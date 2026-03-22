@@ -1,0 +1,44 @@
+name: 求职雷达每日运行
+
+on:
+  schedule:
+    # 北京时间 周二/三/四 09:00 = UTC 01:00
+    # 投递黄金时间：周二至周四上午，HR活跃高峰
+    - cron: '0 1 * * 2,3,4'
+  workflow_dispatch:  # 支持手动触发，方便测试
+
+jobs:
+  job-hunt:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 允许将历史记录 commit 回仓库
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 运行求职雷达
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+        run: python main.py
+
+      - name: 持久化历史记录（commit 回仓库）
+        run: |
+          git config user.name "job-hunter-bot"
+          git config user.email "bot@job-hunter"
+          git add data/sent_jobs.json data/website_hashes.json data/discovered_companies.json || true
+          git diff --staged --quiet || git commit -m "chore: update job history $(date +'%Y-%m-%d')"
+          git push || true
