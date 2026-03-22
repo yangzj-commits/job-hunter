@@ -25,7 +25,7 @@ jobs:
           python-version: '3.11'
 
       - name: 安装依赖
-        run: pip install -r requirements.txt
+        run: pip install -r job-hunter/requirements.txt
 
       - name: 运行求职雷达
         env:
@@ -33,12 +33,12 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
-        run: python main.py
+        run: cd job-hunter && python main.py
 
       - name: 持久化历史记录（commit 回仓库）
         run: |
           git config user.name "job-hunter-bot"
           git config user.email "bot@job-hunter"
-          git add data/sent_jobs.json data/website_hashes.json data/discovered_companies.json || true
+          git add job-hunter/data/sent_jobs.json job-hunter/data/website_hashes.json job-hunter/data/discovered_companies.json || true
           git diff --staged --quiet || git commit -m "chore: update job history $(date +'%Y-%m-%d')"
           git push || true
