@@ -1,0 +1,135 @@
+[
+  {
+    "name": "富士康（鸿海精密）",
+    "category": "外企",
+    "industry": "电子制造",
+    "careers_url": "https://careers.foxconn.com/index.php?m=position&a=search&lang=zh-tw&country=China&city=%E9%83%91%E5%B7%9E",
+    "priority": 3
+  },
+  {
+    "name": "施耐德电气",
+    "category": "外企",
+    "industry": "工业自动化",
+    "careers_url": "https://careers.se.com/global/en/search-results?keywords=&location=%E9%83%91%E5%B7%9E",
+    "priority": 3
+  },
+  {
+    "name": "西门子",
+    "category": "外企",
+    "industry": "工业/医疗",
+    "careers_url": "https://jobs.siemens.com/careers?query=&location=%E9%83%91%E5%B7%9E",
+    "priority": 3
+  },
+  {
+    "name": "飞利浦医疗",
+    "category": "外企",
+    "industry": "医疗设备",
+    "careers_url": "https://www.careers.philips.com.cn/jobs?keywords=&location=Zhengzhou",
+    "priority": 2
+  },
+  {
+    "name": "ABB集团",
+    "category": "外企",
+    "industry": "工业自动化",
+    "careers_url": "https://careers.abb/global/en/search-results?keywords=&location=%E9%83%91%E5%B7%9E",
+    "priority": 2
+  },
+  {
+    "name": "博世集团",
+    "category": "外企",
+    "industry": "汽车零部件",
+    "careers_url": "https://www.bosch.com.cn/careers/find-a-job/?location=Zhengzhou",
+    "priority": 2
+  },
+  {
+    "name": "安永（EY）",
+    "category": "四大",
+    "industry": "专业服务",
+    "careers_url": "https://www.ey.com/zh_cn/careers/students",
+    "priority": 3
+  },
+  {
+    "name": "毕马威（KPMG）",
+    "category": "四大",
+    "industry": "专业服务",
+    "careers_url": "https://home.kpmg/cn/zh/home/careers.html",
+    "priority": 3
+  },
+  {
+    "name": "德勤（Deloitte）",
+    "category": "四大",
+    "industry": "专业服务",
+    "careers_url": "https://www2.deloitte.com/cn/zh/careers.html",
+    "priority": 3
+  },
+  {
+    "name": "普华永道（PwC）",
+    "category": "四大",
+    "industry": "专业服务",
+    "careers_url": "https://www.pwccn.com/zh/careers.html",
+    "priority": 3
+  },
+  {
+    "name": "华为技术",
+    "category": "国内大厂",
+    "industry": "通信/IT",
+    "careers_url": "https://career.huawei.com/reccampportal/portal5/campus-recruitment.html",
+    "priority": 3
+  },
+  {
+    "name": "新华三（H3C）",
+    "category": "国内大厂",
+    "industry": "IT/大数据",
+    "careers_url": "https://www.h3c.com/cn/About_H3C/HR/Latest_Positions/",
+    "priority": 3
+  },
+  {
+    "name": "宇通客车",
+    "category": "郑州本土",
+    "industry": "新能源汽车",
+    "careers_url": "https://www.yutong.com/about-yutong/join-us.html",
+    "priority": 3
+  },
+  {
+    "name": "蜜雪冰城",
+    "category": "郑州本土",
+    "industry": "餐饮/连锁",
+    "careers_url": "https://www.mixuegroupjob.com/",
+    "priority": 2
+  },
+  {
+    "name": "中原银行",
+    "category": "郑州本土",
+    "industry": "金融/银行",
+    "careers_url": "https://www.hncb.com.cn/hncb/gywm/rczp/",
+    "priority": 2
+  },
+  {
+    "name": "辉瑞制药",
+    "category": "外企",
+    "industry": "医药",
+    "careers_url": "https://www.pfizercareerscn.com/",
+    "priority": 2
+  },
+  {
+    "name": "阿斯利康",
+    "category": "外企",
+    "industry": "医药",
+    "careers_url": "https://careers.astrazeneca.cn/",
+    "priority": 2
+  },
+  {
+    "name": "强生",
+    "category": "外企",
+    "industry": "医药/医疗器械",
+    "careers_url": "https://jobs.jnj.com/cn/",
+    "priority": 2
+  },
+  {
+    "name": "渣打银行",
+    "category": "外企",
+    "industry": "金融/银行",
+    "careers_url": "https://www.sc.com/cn/careers/",
+    "priority": 2
+  }
+]
