@@ -1,75 +1,113 @@
 """
-前程无忧（51job）数据抓取模块
-使用 we.51job.com 搜索接口，无需登录
+基于 Gemini Google Search 的岗位搜索模块
+通过 Gemini API 的搜索能力查找郑州招聘信息
+完全绕开中国招聘网站的海外IP封锁问题
 """
 
-import time
 import requests
-from config import SEARCH_KEYWORDS, CITY_CODE_51JOB
+import time
+from config import SEARCH_KEYWORDS, GEMINI_API_KEY, GEMINI_MODEL
 
-_BASE = "https://we.51job.com/api/job/search-pc"
-_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://we.51job.com/",
-    "Accept": "application/json, text/plain, */*",
-}
+_SEARCH_QUERIES = [
+    "郑州 {kw} 招聘 2026 site:zhipin.com OR site:liepin.com OR site:51job.com",
+    "郑州 {kw} 招聘 外企 2026",
+    "Zhengzhou {kw} jobs 2026",
+]
 
 
-def _fetch_page(keyword: str, page: int = 1) -> list[dict]:
-    params = {
-        "api_key": "51job",
-        "keyword": keyword,
-        "searchType": "2",
-        "jobArea": CITY_CODE_51JOB,
-        "pageNum": page,
-        "pageSize": 50,
-        "sortType": "0",
-        "issueDate": "1",
-        "source": "1",
-        "pageCode": "sou|sou|soulb",
+def _search_jobs_via_gemini(keyword: str) -> list[dict]:
+    """用 Gemini + Google Search 搜索岗位"""
+    if not GEMINI_API_KEY:
+        return []
+
+    prompt = f"""请帮我搜索郑州的"{keyword}"相关招聘岗位信息。
+
+要求：
+1. 搜索最新发布的郑州招聘信息
+2. 重点关注外资企业、知名国内企业、四大会计师事务所
+3. 包含实习和全职岗位
+4. 每个岗位返回：职位名称、公司名称、薪资范围、申请链接
+
+请以JSON格式返回，格式如下：
+{{
+  "jobs": [
+    {{
+      "title": "职位名称",
+      "company": "公司名称",
+      "salary": "薪资",
+      "location": "郑州",
+      "url": "申请链接或招聘页面",
+      "description": "简短描述"
+    }}
+  ]
+}}
+
+只返回JSON，不要其他文字。如果没有找到相关岗位，返回 {{"jobs": []}}"""
+
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"google_search": {}}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048},
     }
+
     try:
-        resp = requests.get(_BASE, params=params, headers=_HEADERS, timeout=15)
+        resp = requests.post(url, json=payload, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-        return data.get("resultbody", {}).get("job", {}).get("items", [])
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+
+        import re, json
+        text = re.sub(r"```json\s*|\s*```", "", text).strip()
+        # 找到JSON部分
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if not match:
+            return []
+        result = json.loads(match.group())
+        jobs_raw = result.get("jobs", [])
+
+        jobs = []
+        for raw in jobs_raw:
+            if raw.get("title") and raw.get("company"):
+                jobs.append({
+                    "source": "Gemini搜索",
+                    "title": raw.get("title", ""),
+                    "company": raw.get("company", ""),
+                    "salary": raw.get("salary", "薪资面议"),
+                    "location": raw.get("location", "郑州"),
+                    "experience": "",
+                    "education": "",
+                    "url": raw.get("url", ""),
+                    "publish_date": "",
+                    "description": [raw.get("description", "")],
+                    "search_keyword": keyword,
+                })
+        return jobs
+
     except Exception as e:
-        print(f"[51job] 抓取失败 keyword={keyword} page={page}: {e}")
+        print(f"[Gemini搜索] keyword={keyword} 失败: {e}")
         return []
 
 
-def _parse_job(raw: dict, keyword: str) -> dict:
-    return {
-        "source": "前程无忧",
-        "title": raw.get("job_name", ""),
-        "company": raw.get("company_name", ""),
-        "salary": raw.get("providesalary_text", "薪资面议"),
-        "location": raw.get("workarea_text", ""),
-        "experience": raw.get("workyear_text", ""),
-        "education": raw.get("degreefrom_text", ""),
-        "url": f"https://jobs.51job.com/{raw.get('number','')}.html",
-        "publish_date": raw.get("issuedate", ""),
-        "description": raw.get("job_welf_list", []),
-        "search_keyword": keyword,
-    }
-
-
 def fetch_51job_jobs(max_pages: int = 2) -> list[dict]:
+    """主函数，保持接口名称兼容，实际使用Gemini搜索"""
     all_jobs = []
-    seen_urls = set()
-    for keyword in SEARCH_KEYWORDS:
-        print(f"[51job] 搜索: {keyword}")
-        for page in range(1, max_pages + 1):
-            items = _fetch_page(keyword, page)
-            if not items:
-                break
-            for raw in items:
-                job = _parse_job(raw, keyword)
-                if job["url"] not in seen_urls and job["title"]:
-                    seen_urls.add(job["url"])
-                    all_jobs.append(job)
-            time.sleep(1.5)
-        time.sleep(2)
-    print(f"[51job] 共抓取 {len(all_jobs)} 个岗位")
+    seen = set()
+
+    # 每次只搜索部分关键词，避免消耗过多API额度
+    keywords_to_search = SEARCH_KEYWORDS[:8]
+
+    for keyword in keywords_to_search:
+        print(f"[Gemini搜索] 搜索: {keyword}")
+        jobs = _search_jobs_via_gemini(keyword)
+        for job in jobs:
+            key = f"{job['company']}-{job['title']}"
+            if key not in seen:
+                seen.add(key)
+                all_jobs.append(job)
+        time.sleep(2)  # 避免超出速率限制
+
+    print(f"[Gemini搜索] 共找到 {len(all_jobs)} 个岗位")
     return all_jobs
