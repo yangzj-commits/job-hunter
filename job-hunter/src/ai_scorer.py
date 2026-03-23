@@ -20,39 +20,71 @@ def _build_scoring_prompt(jobs: list) -> str:
     jobs_text = ""
     for i, job in enumerate(jobs):
         jobs_text += (
-            f"\n岗位{i+1}:\n"
-            f"  职位: {job.get('title','')}\n"
-            f"  公司: {job.get('company','')}\n"
-            f"  薪资: {job.get('salary','')}\n"
-            f"  经验要求: {job.get('experience','')}\n"
-            f"  学历要求: {job.get('education','')}\n"
+            f"\nJob{i+1}: title={job.get('title','')}, "
+            f"company={job.get('company','')}, "
+            f"salary={job.get('salary','')}, "
+            f"exp={job.get('experience','')}, "
+            f"edu={job.get('education','')}\n"
         )
 
-    return f"""你是职业规划顾问。根据求职者背景对每个岗位评分（0-100分）。
+    return f"""Score these jobs for this candidate. Return ONLY a JSON array, no other text.
 
-求职者背景：
-- 学历：{PROFILE['education']}
-- 技能：{', '.join(PROFILE['skills'])}
-- 状态：{PROFILE['status']}，目标城市郑州
-- 期望薪资：全职{PROFILE['min_salary_fulltime']}元+
-- 排除：{', '.join(PROFILE['exclude_keywords'])}
+Candidate: Sheffield MSc Information Management student (2025-2026), skills: data analysis, Tableau, Excel, Figma, project coordination. Seeking internship or graduate jobs in Zhengzhou. Min salary 5000 CNY/month for fulltime.
 
-待评估岗位（共{len(jobs)}个）：
+Jobs to score:
 {jobs_text}
 
-评分标准：80-100强烈推荐，60-79值得申请，40-59可以考虑，0-39不匹配。
+Return this exact JSON format with no extra text:
+[
+  {{"index": 1, "score": 85, "reason": "good match", "apply_type": "internship"}},
+  {{"index": 2, "score": 60, "reason": "ok match", "apply_type": "fulltime"}}
+]
 
-返回JSON（只返回JSON）：
-{{
-  "results": [
-    {{
-      "index": 1,
-      "score": 85,
-      "reason": "一句话评分依据",
-      "apply_type": "实习/全职/均可"
-    }}
-  ]
-}}"""
+Score 80-100=strongly recommend, 60-79=worth applying, 40-59=consider, 0-39=skip."""
+
+
+def _parse_score_response(text: str, batch_size: int) -> dict:
+    """多层容错解析，尽力从响应中提取评分"""
+    text = text.strip()
+
+    # 尝试1: 直接解析
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return {item["index"]: item for item in data if "index" in item}
+    except Exception:
+        pass
+
+    # 尝试2: 提取 [...] 部分
+    try:
+        match = re.search(r'\[.*?\]', text, re.DOTALL)
+        if match:
+            data = json.loads(match.group())
+            if isinstance(data, list):
+                return {item["index"]: item for item in data if "index" in item}
+    except Exception:
+        pass
+
+    # 尝试3: 用正则逐条提取 index 和 score
+    scores = {}
+    pattern = r'"index"\s*:\s*(\d+).*?"score"\s*:\s*(\d+).*?"reason"\s*:\s*"([^"]*)".*?"apply_type"\s*:\s*"([^"]*)"'
+    for m in re.finditer(pattern, text, re.DOTALL):
+        idx = int(m.group(1))
+        scores[idx] = {
+            "index": idx,
+            "score": int(m.group(2)),
+            "reason": m.group(3),
+            "apply_type": m.group(4),
+        }
+    if scores:
+        return scores
+
+    # 尝试4: 只提取 index 和 score
+    scores = {}
+    for m in re.finditer(r'"index"\s*:\s*(\d+)[^}]*"score"\s*:\s*(\d+)', text):
+        idx = int(m.group(1))
+        scores[idx] = {"index": idx, "score": int(m.group(2)), "reason": "", "apply_type": ""}
+    return scores
 
 
 def score_jobs_with_gemini(jobs: list) -> list:
@@ -67,7 +99,7 @@ def score_jobs_with_gemini(jobs: list) -> list:
         return jobs
 
     jobs = _pre_filter(jobs)
-    batch_size = 40
+    batch_size = 30
     all_scored = []
 
     for batch_start in range(0, len(jobs), batch_size):
@@ -79,11 +111,7 @@ def score_jobs_with_gemini(jobs: list) -> list:
                f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 2048,
-                "responseMimeType": "application/json",
-            },
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 3000},
         }
 
         try:
@@ -91,14 +119,13 @@ def score_jobs_with_gemini(jobs: list) -> list:
             resp.raise_for_status()
             data = resp.json()
             text = data["candidates"][0]["content"]["parts"][0]["text"]
-            text = re.sub(r"```json\s*|\s*```", "", text).strip()
-            result = json.loads(text)
-            scores = {r["index"]: r for r in result.get("results", [])}
+            scores = _parse_score_response(text, len(batch))
+            print(f"[AI筛选] 解析到 {len(scores)} 条评分")
 
             for i, job in enumerate(batch):
                 idx = i + 1
                 score_data = scores.get(idx, {})
-                base_score = score_data.get("score", 50)
+                base_score = score_data.get("score", 55)
                 bonus = 10 if _is_priority_company(job.get("company", "")) else 0
                 job["score"] = min(100, base_score + bonus)
                 job["score_reason"] = score_data.get("reason", "")
@@ -108,14 +135,15 @@ def score_jobs_with_gemini(jobs: list) -> list:
         except Exception as e:
             print(f"[AI筛选] 评分失败: {e}")
             for job in batch:
-                job["score"] = 50
-                job["score_reason"] = f"评分出错: {str(e)[:50]}"
-                job["apply_type"] = "未知"
+                job["score"] = 55
+                job["score_reason"] = ""
+                job["apply_type"] = ""
                 all_scored.append(job)
 
         if batch_start + batch_size < len(jobs):
             time.sleep(3)
 
     all_scored.sort(key=lambda x: x.get("score", 0), reverse=True)
-    print(f"[AI筛选] 评分完成，最高分: {all_scored[0].get('score', 0) if all_scored else 0}")
+    top = all_scored[0].get("score", 0) if all_scored else 0
+    print(f"[AI筛选] 评分完成，最高分: {top}")
     return all_scored
