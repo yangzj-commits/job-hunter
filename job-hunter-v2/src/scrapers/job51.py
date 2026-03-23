@@ -1,21 +1,14 @@
 """
-求职雷达 · 双轨搜索引擎 (v2.0 - Grounding版)
+求职雷达 · 双轨搜索引擎 (v2.1 - 质量白名单版)
 ============================================================
-改进要点：
-  1. 使用 google-genai 官方 SDK，正确访问 groundingMetadata
-  2. 两步法：Step1开搜索返回文本+URL，Step2强制JSON提取
-  3. 从 groundingChunks 提取真实来源URL，立即解析重定向
-  4. 宁缺毋滥：无搜索证据（无groundingChunks）的结果一律丢弃
-  5. URL分级：具体岗位页 > 公司招聘官网 > 招聘平台搜索结果
-  6. 自动学习：发现有证据的新公司自动加入白名单
-
-研究参考：
-  - github.com/googleapis/python-genai (官方SDK)
-  - github.com/googleapis/python-genai/issues/1512 (redirect URL问题)
-  - cennest.com/making-sense-of-the-gemini-2-5-flash... (URL masking技巧)
-  - ai.google.dev/gemini-api/docs/google-search (grounding文档)
-
-注意：Gemini 2.5+ 的 confidenceScores 不可用，改用有无groundingChunks判断真实性
+v2.1 改进：
+  - 自动学习白名单增加质量筛选，符合 B/C/D/E/F 任一条件才加入：
+      B. 上市公司（A股/港股/美股等）
+      C. 外资独资或中外合资企业
+      D. 世界500强或中国500强
+      E. 所在行业国内市场份额前5名
+      F. 有独立校园招聘体系（官方校招专页或正规offer流程）
+  - 不符合任何条件的公司（本地小公司等）一律不加入白名单
 """
 
 import os
@@ -25,7 +18,6 @@ import time
 import hashlib
 import requests
 
-# 使用官方 google-genai SDK
 from google import genai
 from google.genai import types
 
@@ -54,8 +46,8 @@ COMPANY_CAREER_URLS = {
     "ey": "https://www.ey.com/zh_cn/careers",
     "毕马威": "https://home.kpmg/cn/zh/home/careers.html",
     "kpmg": "https://home.kpmg/cn/zh/home/careers.html",
-    "普华永道": "https://www.pwccn.com/zh/careers.html",
-    "pwc": "https://www.pwccn.com/zh/careers.html",
+    "普华永道": "https://www.pwccin.com/zh/careers.html",
+    "pwc": "https://www.pwccin.com/zh/careers.html",
     "德勤": "https://www2.deloitte.com/cn/zh/careers.html",
     "deloitte": "https://www2.deloitte.com/cn/zh/careers.html",
     "施耐德": "https://www.se.com/cn/zh/about-us/careers/",
@@ -78,7 +70,6 @@ COMPANY_CAREER_URLS = {
     "中原银行": "https://www.zynbank.com/zhaopin/index.html",
 }
 
-# 具体岗位页URL关键词
 JOB_PAGE_KEYWORDS = [
     "/job/", "/jobs/", "/position/", "/vacancy/", "/opening/",
     "/apply/", "jobid=", "positionid=", "job_id=",
@@ -91,7 +82,6 @@ JOB_PAGE_KEYWORDS = [
     "/招聘/", "/岗位/", "/职位/",
 ]
 
-# 公司招聘官网特征
 CAREER_PAGE_KEYWORDS = [
     "/career", "/careers", "/recruit", "/recruitment",
     "/join-us", "/join_us", "/joinus",
@@ -106,11 +96,7 @@ CAREER_PAGE_KEYWORDS = [
 # ============================================================
 
 def resolve_redirect_url(redirect_url: str, timeout: int = 6) -> str:
-    """
-    跟随重定向，获取真实目标URL。
-    groundingChunks 返回的是 vertexaisearch.cloud.google.com/grounding-api-redirect/...
-    这些是临时链接，需要立即解析。
-    """
+    """跟随重定向，获取真实目标URL。"""
     if not redirect_url:
         return ""
     try:
@@ -122,7 +108,6 @@ def resolve_redirect_url(redirect_url: str, timeout: int = 6) -> str:
         )
         return resp.url
     except Exception:
-        # HEAD失败时尝试GET（stream模式避免下载body）
         try:
             resp = requests.get(
                 redirect_url,
@@ -134,28 +119,20 @@ def resolve_redirect_url(redirect_url: str, timeout: int = 6) -> str:
             resp.close()
             return resp.url
         except Exception:
-            return redirect_url  # 解析失败则保留原链接
+            return redirect_url
 
 
 def classify_url(url: str) -> str:
-    """
-    判断URL类型：
-    'job_page'      - 具体岗位详情页（最优）
-    'career_page'   - 公司招聘官网（备用）
-    'other'         - 其他（搜索结果页等）
-    """
+    """判断URL类型：job_page / career_page / other"""
     if not url:
         return "none"
     url_lower = url.lower()
-
     for kw in JOB_PAGE_KEYWORDS:
         if kw in url_lower:
             return "job_page"
-
     for kw in CAREER_PAGE_KEYWORDS:
         if kw in url_lower:
             return "career_page"
-
     return "other"
 
 
@@ -169,11 +146,7 @@ def get_company_fallback_url(company_name: str) -> str:
 
 
 def pick_best_url(grounding_urls: list, company_name: str) -> tuple:
-    """
-    从grounding URL列表中选出最优链接。
-    返回 (url, url_type)
-    优先级：job_page > career_page > fallback官网 > 空
-    """
+    """从grounding URL列表中选出最优链接。返回 (url, url_type)"""
     job_page = ""
     career_page = ""
 
@@ -190,7 +163,6 @@ def pick_best_url(grounding_urls: list, company_name: str) -> tuple:
     if career_page:
         return career_page, "career_page"
 
-    # Fallback：查映射表
     fallback = get_company_fallback_url(company_name)
     if fallback:
         return fallback, "fallback"
@@ -203,15 +175,8 @@ def pick_best_url(grounding_urls: list, company_name: str) -> tuple:
 # ============================================================
 
 def _search_with_grounding(query: str, delay: float = 2.5) -> dict:
-    """
-    使用 google-genai SDK 调用 Gemini，开启 google_search 工具。
-    返回:
-      text         - Gemini的自然语言回答
-      urls         - 解析后的真实URL列表
-      has_grounding - 是否有搜索证据（groundingChunks非空）
-      search_queries- Gemini实际使用的搜索词
-    """
-    time.sleep(delay)  # 避免触发速率限制
+    """开启 google_search 工具搜索，返回文本 + 真实URL列表"""
+    time.sleep(delay)
 
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
 
@@ -233,34 +198,27 @@ def _search_with_grounding(query: str, delay: float = 2.5) -> dict:
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[grounding_tool],
-                temperature=1.0,  # 官方建议grounding时用1.0
+                temperature=1.0,
             ),
         )
 
         text = response.text or ""
-
-        # --- 提取 groundingChunks 中的真实URL ---
         urls = []
         search_queries = []
+
         try:
             candidate = response.candidates[0]
             meta = candidate.grounding_metadata
             if meta:
-                # 获取实际搜索词（调试用）
                 if meta.web_search_queries:
                     search_queries = list(meta.web_search_queries)
-
-                # 提取并立即解析每个redirect URL
                 if meta.grounding_chunks:
                     for chunk in meta.grounding_chunks:
                         if chunk.web and chunk.web.uri:
                             redirect_url = chunk.web.uri
                             domain_title = chunk.web.title or ""
-
-                            # 立即跟随重定向获取真实URL
                             real_url = resolve_redirect_url(redirect_url)
                             url_type = classify_url(real_url)
-
                             urls.append({
                                 "redirect_url": redirect_url,
                                 "real_url": real_url,
@@ -270,12 +228,10 @@ def _search_with_grounding(query: str, delay: float = 2.5) -> dict:
         except Exception as e:
             print(f"    [URL提取] 警告: {e}")
 
-        has_grounding = len(urls) > 0
-
         return {
             "text": text,
             "urls": urls,
-            "has_grounding": has_grounding,
+            "has_grounding": len(urls) > 0,
             "search_queries": search_queries,
             "original_query": query,
         }
@@ -296,12 +252,7 @@ def _search_with_grounding(query: str, delay: float = 2.5) -> dict:
 # ============================================================
 
 def _extract_jobs_as_json(search_result: dict) -> list:
-    """
-    将Step1的自然语言文本提炼为结构化job列表。
-    不开搜索工具，可以使用 response_mime_type="application/json"。
-
-    关键技巧：URL由代码注入，不让Gemini重写（避免字符变异）
-    """
+    """将Step1的自然语言文本提炼为结构化job列表。"""
     text = search_result.get("text", "")
     urls = search_result.get("urls", [])
     has_grounding = search_result.get("has_grounding", False)
@@ -309,7 +260,6 @@ def _extract_jobs_as_json(search_result: dict) -> list:
     if not text or not has_grounding:
         return []
 
-    # 构建URL参考列表（只传domain_title，让Gemini匹配公司名）
     url_ref = ""
     if urls:
         url_ref = "\n\n【搜索来源域名参考】\n"
@@ -357,48 +307,32 @@ def _extract_jobs_as_json(search_result: dict) -> list:
         )
 
         raw = (response.text or "[]").strip()
-        # 清理可能的markdown代码块
         raw = re.sub(r"^```json?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        raw = raw.strip()
+        raw = re.sub(r"\s*```$", "", raw).strip()
 
         jobs = json.loads(raw)
-        if not isinstance(jobs, list):
-            return []
+        return [j for j in jobs if isinstance(j, dict)] if isinstance(jobs, list) else []
 
-        return [j for j in jobs if isinstance(j, dict)]
-
-    except json.JSONDecodeError as e:
-        print(f"    [JSON解析] 失败: {e}")
-        return []
     except Exception as e:
         print(f"    [结构化提取] 失败: {e}")
         return []
 
 
 # ============================================================
-# 岗位后处理：注入URL + 添加元数据
+# 岗位后处理
 # ============================================================
 
 def _post_process_jobs(raw_jobs: list, search_result: dict, source_label: str) -> list:
-    """
-    将结构化job和grounding URL合并：
-    - 为每个job匹配最优URL
-    - 添加 grounded / has_url / source 等元数据字段
-    - 只保留有搜索证据的job（宁缺毋滥）
-    """
+    """合并job和grounding URL，只保留有搜索证据的岗位。"""
     urls = search_result.get("urls", [])
     has_grounding = search_result.get("has_grounding", False)
 
-    # 宁缺毋滥：整批搜索无grounding则全部丢弃
     if not has_grounding:
         return []
 
     result = []
     for job in raw_jobs:
         company = job.get("company", "")
-
-        # 根据source_domain匹配grounding URL
         source_domain = job.get("source_domain", "")
         matching_urls = [
             u for u in urls
@@ -417,17 +351,13 @@ def _post_process_jobs(raw_jobs: list, search_result: dict, source_label: str) -
             "apply_type": job.get("apply_type", "fulltime"),
             "source": source_label,
             "url": best_url,
-            "url_type": url_type,    # job_page / career_page / fallback / none
-            "grounded": True,         # 有搜索证据
+            "url_type": url_type,
+            "grounded": True,
             "has_url": bool(best_url),
         })
 
     return result
 
-
-# ============================================================
-# 去重工具
-# ============================================================
 
 def _job_hash(job: dict) -> str:
     key = f"{job.get('company','').strip()}-{job.get('title','').strip()}"
@@ -435,13 +365,89 @@ def _job_hash(job: dict) -> str:
 
 
 # ============================================================
-# 白名单自动更新
+# 公司质量筛选（v2.1 新增）
+# ============================================================
+
+def _is_quality_company_batch(company_names: list) -> dict:
+    """
+    批量判断公司是否符合白名单质量标准，B/C/D/E/F 任一符合即为合格。
+    返回 {公司名: True/False}
+
+    标准：
+      B. 上市公司（A股/港股/美股/纽交所/纳斯达克等任一交易所上市）
+      C. 外资独资或中外合资企业
+      D. 世界500强或中国500强成员
+      E. 所在行业国内市场份额前5名
+      F. 有独立的校园招聘体系（官方校招专页或正规offer流程）
+    """
+    if not company_names:
+        return {}
+
+    names_text = "\n".join(f"- {n}" for n in company_names)
+
+    prompt = f"""你是企业信息核查助手。请判断以下每家公司是否符合至少一条标准：
+
+标准（符合任意一条即为"合格"）：
+B. 上市公司（在A股、港股、美股、纽交所、纳斯达克等任一交易所上市）
+C. 外资独资或中外合资企业
+D. 世界500强或中国500强成员
+E. 所在行业国内市场份额前5名
+F. 有独立的校园招聘体系（官方校招专页或正规offer流程）
+
+待判断公司列表：
+{names_text}
+
+重要原则：
+- 只基于你掌握的客观事实判断
+- 不确定或无法核实的公司，统一判为不合格（qualified: false）
+- 宁缺毋滥，避免将小型本地公司误判为合格
+
+返回纯JSON对象，不要任何其他文字：
+{{
+  "公司名": {{"qualified": true, "reason": "上市公司(A股上交所)", "matched_criteria": "B"}},
+  "公司名2": {{"qualified": false, "reason": "小型本地公司，不符合任何标准", "matched_criteria": ""}}
+}}"""
+
+    try:
+        client = _get_client()
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
+
+        raw = (response.text or "{}").strip()
+        raw = re.sub(r"^```json?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw).strip()
+        result = json.loads(raw)
+
+        qualified = {}
+        for name in company_names:
+            info = result.get(name, {})
+            is_qualified = info.get("qualified", False)
+            qualified[name] = is_qualified
+            if is_qualified:
+                print(f"    ✓ {name}：{info.get('reason', '')} [{info.get('matched_criteria', '')}]")
+            else:
+                print(f"    ✗ {name}：{info.get('reason', '不符合任何标准')}")
+        return qualified
+
+    except Exception as e:
+        print(f"    [公司质量判断] 失败: {e}，默认全部不通过")
+        return {name: False for name in company_names}
+
+
+# ============================================================
+# 白名单自动更新（v2.1 带质量筛选）
 # ============================================================
 
 def _update_whitelist_with_new_companies(jobs: list, whitelist: list, config: dict) -> list:
     """
-    将有搜索证据的新公司（不在白名单中的）加入白名单。
-    保持白名单不超过 WHITELIST_MAX_SIZE。
+    将有搜索证据的新公司，经质量筛选（B/C/D/E/F 任一符合）后加入白名单。
+    不符合任何标准的公司（本地小公司等）一律排除。
     """
     if not config.get("AUTO_UPDATE_WHITELIST", True):
         return whitelist
@@ -449,23 +455,52 @@ def _update_whitelist_with_new_companies(jobs: list, whitelist: list, config: di
     max_size = config.get("WHITELIST_MAX_SIZE", 50)
     existing_names = {w.get("name", "").strip() for w in whitelist}
 
+    # 收集本次新出现的公司名（去重）
+    candidate_names = []
+    seen = set()
+    for job in jobs:
+        company = job.get("company", "").strip()
+        if company and company not in existing_names and company not in seen:
+            candidate_names.append(company)
+            seen.add(company)
+
+    if not candidate_names:
+        return whitelist
+
+    print(f"[自动学习] 发现 {len(candidate_names)} 家新公司，开始质量筛选...")
+
+    # 批量质量判断（每批最多20家，防止 prompt 过长）
+    batch_size = 20
+    qualified_map = {}
+    for i in range(0, len(candidate_names), batch_size):
+        batch = candidate_names[i: i + batch_size]
+        time.sleep(2)
+        qualified_map.update(_is_quality_company_batch(batch))
+
+    # 只收录通过质量筛选的公司
     newly_added = []
     for job in jobs:
         company = job.get("company", "").strip()
-        career_url = get_company_fallback_url(company) or job.get("url", "")
-
-        if company and company not in existing_names:
-            if len(whitelist) + len(newly_added) < max_size:
-                newly_added.append({
-                    "name": company,
-                    "careers_url": career_url,
-                    "auto_added": True,
-                })
-                existing_names.add(company)
+        if not company or company in existing_names:
+            continue
+        if not qualified_map.get(company, False):
+            continue
+        if len(whitelist) + len(newly_added) >= max_size:
+            break
+        if company not in {c["name"] for c in newly_added}:
+            career_url = get_company_fallback_url(company) or job.get("url", "")
+            newly_added.append({
+                "name": company,
+                "careers_url": career_url,
+                "auto_added": True,
+            })
+            existing_names.add(company)
 
     if newly_added:
-        print(f"[自动学习] 新增 {len(newly_added)} 家公司到白名单: "
+        print(f"[自动学习] 通过筛选，新增 {len(newly_added)} 家公司: "
               f"{', '.join(c['name'] for c in newly_added)}")
+    else:
+        print("[自动学习] 本次无公司通过质量筛选")
 
     return whitelist + newly_added
 
@@ -477,13 +512,8 @@ def _update_whitelist_with_new_companies(jobs: list, whitelist: list, config: di
 def fetch_all_jobs(config: dict, whitelist: list) -> tuple:
     """
     主函数：执行双轨搜索，返回 (jobs, updated_whitelist)
-
     Track A：扩展关键词 × 招聘平台搜索
     Track B：白名单公司 × 定向岗位搜索
-
-    宁缺毋滥原则：
-      - 只返回有 groundingChunks 证据的搜索结果中的岗位
-      - 每个岗位尽力提供可点击的真实链接
     """
     all_jobs = []
     seen_hashes = set()
@@ -506,9 +536,7 @@ def fetch_all_jobs(config: dict, whitelist: list) -> tuple:
     for kw in keywords:
         query = f"郑州 {kw} 招聘 2026 ({site_filter})"
         print(f"  ▸ {kw}")
-
         search_result = _search_with_grounding(query)
-
         if search_result["has_grounding"]:
             raw_jobs = _extract_jobs_as_json(search_result)
             processed = _post_process_jobs(raw_jobs, search_result, "关键词搜索")
@@ -525,12 +553,9 @@ def fetch_all_jobs(config: dict, whitelist: list) -> tuple:
         name = company.get("name", "") if isinstance(company, dict) else str(company)
         if not name:
             continue
-
         query = f"{name} 郑州 2026 招聘 应届生 实习 (site:liepin.com OR site:zhipin.com OR site:{name.lower()}.com)"
         print(f"  ▸ {name}")
-
         search_result = _search_with_grounding(query)
-
         if search_result["has_grounding"]:
             raw_jobs = _extract_jobs_as_json(search_result)
             processed = _post_process_jobs(raw_jobs, search_result, "定向搜索")
@@ -541,8 +566,6 @@ def fetch_all_jobs(config: dict, whitelist: list) -> tuple:
 
     print(f"  轨道B完成，当前共 {len(all_jobs)} 个岗位\n")
 
-    # ── 自动学习：更新白名单 ──────────────────────────────────
     updated_whitelist = _update_whitelist_with_new_companies(all_jobs, whitelist, config)
-
     print(f"[搜索] 双轨搜索完成，共找到 {len(all_jobs)} 个有搜索证据的岗位")
     return all_jobs, updated_whitelist
