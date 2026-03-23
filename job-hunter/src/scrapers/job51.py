@@ -1,9 +1,7 @@
 """
 岗位搜索模块
-双轨搜索：
-  1. 关键词搜索（通用岗位）
-  2. 白名单公司定向搜索（针对每家目标公司单独搜索郑州岗位）
-全部通过 Gemini API + Google Search 实现，绕开海外IP封锁
+通过 Gemini API 搜索郑州招聘信息
+双轨：关键词搜索 + 白名单公司定向搜索
 """
 
 import json
@@ -23,52 +21,27 @@ def _call_gemini(prompt: str) -> list[dict]:
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "tools": [{"google_search": {}}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048},
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 4096,
+            "responseMimeType": "application/json",
+        },
     }
 
     try:
         resp = requests.post(url, json=payload, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-        text = ""
-        for part in data["candidates"][0]["content"]["parts"]:
-            if "text" in part:
-                text += part["text"]
-
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
         text = re.sub(r"```json\s*|\s*```", "", text).strip()
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if not match:
-            return []
-        result = json.loads(match.group())
+        result = json.loads(text)
         return result.get("jobs", [])
-
     except Exception as e:
         print(f"[搜索] Gemini调用失败: {e}")
         return []
 
 
-def _build_prompt(query_desc: str) -> str:
-    return f"""请通过Google搜索，找出{query_desc}。
-
-返回JSON格式，只返回JSON不要其他文字：
-{{
-  "jobs": [
-    {{
-      "title": "职位名称",
-      "company": "公司名称",
-      "salary": "薪资（如不知道填'薪资面议'）",
-      "location": "郑州",
-      "url": "招聘页面链接",
-      "description": "岗位简要描述"
-    }}
-  ]
-}}
-
-没有找到时返回：{{"jobs": []}}"""
-
-
-def _parse_jobs(raw_list: list, keyword: str, source: str = "Gemini搜索") -> list[dict]:
+def _parse_jobs(raw_list: list, keyword: str, source: str) -> list[dict]:
     jobs = []
     for raw in raw_list:
         if raw.get("title") and raw.get("company"):
@@ -78,8 +51,8 @@ def _parse_jobs(raw_list: list, keyword: str, source: str = "Gemini搜索") -> l
                 "company": raw.get("company", ""),
                 "salary": raw.get("salary", "薪资面议"),
                 "location": raw.get("location", "郑州"),
-                "experience": "",
-                "education": "",
+                "experience": raw.get("experience", ""),
+                "education": raw.get("education", ""),
                 "url": raw.get("url", ""),
                 "publish_date": "",
                 "description": [raw.get("description", "")],
@@ -89,7 +62,6 @@ def _parse_jobs(raw_list: list, keyword: str, source: str = "Gemini搜索") -> l
 
 
 def _load_whitelist_companies() -> list[str]:
-    """读取白名单公司名称列表"""
     try:
         with open(COMPANY_WHITELIST_FILE, "r", encoding="utf-8") as f:
             companies = json.load(f)
@@ -98,64 +70,105 @@ def _load_whitelist_companies() -> list[str]:
         return []
 
 
+def _build_keyword_prompt(keywords: list[str]) -> str:
+    kw_str = "、".join(keywords)
+    return f"""你是一个招聘信息助手。请根据你的知识，列出郑州市2025-2026年春招/社招中，
+与以下岗位类型相关的招聘信息：{kw_str}
+
+重点关注：
+- 外资企业（如施耐德、西门子、ABB、四大会计师事务所等）
+- 知名国内企业（如华为、新华三、宇通、蜜雪冰城等）
+- 互联网大厂郑州分支（如字节跳动、京东、阿里等）
+- 适合信息管理/数据分析专业应届硕士或实习生的岗位
+
+请以JSON格式返回，包含尽可能多的真实岗位（目标20个以上）：
+{{
+  "jobs": [
+    {{
+      "title": "职位名称",
+      "company": "公司名称",
+      "salary": "薪资范围",
+      "location": "郑州",
+      "experience": "经验要求",
+      "education": "学历要求",
+      "url": "招聘官网或平台链接",
+      "description": "岗位简要描述"
+    }}
+  ]
+}}"""
+
+
+def _build_company_prompt(companies: list[str]) -> str:
+    company_str = "、".join(companies)
+    return f"""你是一个招聘信息助手。请列出以下公司在郑州的招聘岗位（实习或全职均可）：
+{company_str}
+
+这些公司在郑州有分支机构或办事处。请根据你的知识列出这些公司近期可能开放的郑州岗位，
+特别是适合信息管理/数据分析背景应届硕士的非技术类岗位（如运营、分析、咨询、管培生等）。
+
+以JSON格式返回：
+{{
+  "jobs": [
+    {{
+      "title": "职位名称",
+      "company": "公司名称",
+      "salary": "薪资范围",
+      "location": "郑州",
+      "experience": "经验要求",
+      "education": "学历要求",
+      "url": "该公司招聘官网链接",
+      "description": "岗位描述"
+    }}
+  ]
+}}"""
+
+
 def fetch_51job_jobs(max_pages: int = 2) -> list[dict]:
-    """
-    双轨搜索主函数
-    轨道A：通用关键词搜索
-    轨道B：白名单公司定向搜索
-    """
+    """双轨搜索主函数"""
     all_jobs = []
     seen = set()
 
-    # ── 轨道A：关键词搜索（取前6个关键词）──────────────────────
+    # ── 轨道A：关键词搜索 ─────────────────────────────────────
     print("[搜索] 轨道A：关键词搜索")
-    keywords_to_use = SEARCH_KEYWORDS[:6]
-    for keyword in keywords_to_use:
-        print(f"[搜索] 关键词: {keyword}")
-        query = f"郑州最新招聘'{keyword}'岗位，2025年或2026年发布，包含外资企业和知名企业"
-        raw_list = _call_gemini(_build_prompt(query))
-        jobs = _parse_jobs(raw_list, keyword, "关键词搜索")
-        for job in jobs:
-            key = f"{job['company']}-{job['title']}"
-            if key not in seen:
-                seen.add(key)
-                all_jobs.append(job)
-        print(f"  找到 {len(jobs)} 个岗位")
-        time.sleep(3)
+    keywords = SEARCH_KEYWORDS[:8]
+    prompt_a = _build_keyword_prompt(keywords)
+    raw_a = _call_gemini(prompt_a)
+    jobs_a = _parse_jobs(raw_a, "关键词搜索", "Gemini推荐")
+    for job in jobs_a:
+        key = f"{job['company']}-{job['title']}"
+        if key not in seen:
+            seen.add(key)
+            all_jobs.append(job)
+    print(f"  找到 {len(jobs_a)} 个岗位")
+    time.sleep(3)
 
-    # ── 轨道B：白名单公司定向搜索（每次取前8家）──────────────
-    print("\n[搜索] 轨道B：白名单公司定向搜索")
-    companies = _load_whitelist_companies()[:8]
+    # ── 轨道B：白名单公司定向搜索 ─────────────────────────────
+    print("[搜索] 轨道B：白名单公司定向搜索")
+    companies = _load_whitelist_companies()
     if companies:
-        # 把多家公司合并成一次查询，节省API额度
-        company_list = "、".join(companies)
-        query = (f"以下公司在郑州的最新招聘信息（实习或全职）：{company_list}。"
-                 f"搜索这些公司官网或招聘平台上的郑州岗位")
-        print(f"[搜索] 定向搜索 {len(companies)} 家公司...")
-        raw_list = _call_gemini(_build_prompt(query))
-        jobs = _parse_jobs(raw_list, "白名单公司", "定向搜索")
-        for job in jobs:
+        # 第一批（前10家）
+        prompt_b1 = _build_company_prompt(companies[:10])
+        raw_b1 = _call_gemini(prompt_b1)
+        jobs_b1 = _parse_jobs(raw_b1, "白名单定向", "定向搜索")
+        for job in jobs_b1:
             key = f"{job['company']}-{job['title']}"
             if key not in seen:
                 seen.add(key)
                 all_jobs.append(job)
-        print(f"  找到 {len(jobs)} 个岗位")
+        print(f"  第一批找到 {len(jobs_b1)} 个岗位")
         time.sleep(3)
 
-        # 剩余公司再搜一批
-        companies_rest = _load_whitelist_companies()[8:16]
-        if companies_rest:
-            company_list2 = "、".join(companies_rest)
-            query2 = (f"以下公司在郑州的最新招聘信息：{company_list2}。"
-                      f"搜索这些公司的郑州岗位")
-            raw_list2 = _call_gemini(_build_prompt(query2))
-            jobs2 = _parse_jobs(raw_list2, "白名单公司", "定向搜索")
-            for job in jobs2:
+        # 第二批（后10家）
+        if len(companies) > 10:
+            prompt_b2 = _build_company_prompt(companies[10:20])
+            raw_b2 = _call_gemini(prompt_b2)
+            jobs_b2 = _parse_jobs(raw_b2, "白名单定向", "定向搜索")
+            for job in jobs_b2:
                 key = f"{job['company']}-{job['title']}"
                 if key not in seen:
                     seen.add(key)
                     all_jobs.append(job)
-            print(f"  第二批找到 {len(jobs2)} 个岗位")
+            print(f"  第二批找到 {len(jobs_b2)} 个岗位")
 
     print(f"\n[搜索] 双轨搜索完成，共 {len(all_jobs)} 个岗位")
     return all_jobs
