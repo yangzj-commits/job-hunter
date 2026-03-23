@@ -41,14 +41,9 @@ def main():
     except Exception as e:
         print(f"  ✗ 前程无忧抓取失败：{e}")
 
-    # ── 步骤2：官网监控 ───────────────────────────────────────────
-    print("\n【步骤2】白名单公司官网监控")
-    try:
-        jobs_monitor = monitor_company_websites()
-        all_jobs.extend(jobs_monitor)
-        print(f"  ✓ 官网监控完成：{len(jobs_monitor)} 个变动提示")
-    except Exception as e:
-        print(f"  ✗ 官网监控失败：{e}")
+# ── 步骤2：官网监控（暂时跳过，中国公司官网在海外IP不可达）──
+    print("\n【步骤2】官网监控（跳过）")
+    jobs_monitor = []
 
     # ── 步骤3：公司自动发现 ───────────────────────────────────────
     print("\n【步骤3】公司自动发现")
