@@ -2,8 +2,8 @@ name: 求职雷达每日运行
 
 on:
   schedule:
-    - cron: '0 1 * * 2,3,4'
-  workflow_dispatch:
+    - cron: '0 1 * * 2,3,4'   # 北京时间 周二/三/四 09:00
+  workflow_dispatch:            # 支持手动触发
 
 jobs:
   job-hunt:
@@ -14,8 +14,6 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
@@ -23,7 +21,7 @@ jobs:
           python-version: '3.11'
 
       - name: 安装依赖
-        run: pip install -r job-hunter/requirements.txt
+        run: pip install -r job-hunter-v2/job-hunter-v2/requirements.txt
 
       - name: 运行求职雷达
         env:
@@ -31,12 +29,12 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
-        run: cd job-hunter && python main.py
+        run: cd job-hunter-v2/job-hunter-v2 && python main.py
 
       - name: 持久化历史记录（commit 回仓库）
         run: |
-          git config user.name "job-hunter-bot"
-          git config user.email "bot@job-hunter"
-          git add job-hunter/data/sent_jobs.json job-hunter/data/website_hashes.json job-hunter/data/discovered_companies.json || true
-          git diff --staged --quiet || git commit -m "chore: update job history $(date +'%Y-%m-%d')"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add job-hunter-v2/job-hunter-v2/data/*.json || true
+          git diff --staged --quiet || git commit -m "chore: 更新求职历史记录 $(date +'%Y-%m-%d')"
           git push || true
