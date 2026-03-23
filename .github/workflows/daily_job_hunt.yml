@@ -2,8 +2,8 @@ name: 求职雷达每日运行
 
 on:
   schedule:
-    - cron: '0 1 * * 2,3,4'   # 北京时间 周二/三/四 09:00
-  workflow_dispatch:            # 支持手动触发
+    - cron: '0 1 * * 2,3,4'
+  workflow_dispatch:
 
 jobs:
   job-hunt:
@@ -20,8 +20,19 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: 查看仓库结构（调试用）
+        run: find . -name "requirements.txt" -o -name "main.py" | grep -v ".git" | sort
+
+      - name: 检测项目根目录
+        id: find_root
+        run: |
+          MAIN_PATH=$(find . -name "main.py" | grep -v ".git" | head -1)
+          PROJECT_DIR=$(dirname "$MAIN_PATH")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_OUTPUT
+          echo "找到项目目录: $PROJECT_DIR"
+
       - name: 安装依赖
-        run: pip install -r job-hunter-v2/job-hunter-v2/requirements.txt
+        run: pip install -r ${{ steps.find_root.outputs.PROJECT_DIR }}/requirements.txt
 
       - name: 运行求职雷达
         env:
@@ -29,12 +40,12 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
-        run: cd job-hunter-v2/job-hunter-v2 && python main.py
+        run: cd ${{ steps.find_root.outputs.PROJECT_DIR }} && python main.py
 
-      - name: 持久化历史记录（commit 回仓库）
+      - name: 持久化历史记录
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add job-hunter-v2/job-hunter-v2/data/*.json || true
+          git add -A "*/data/*.json" || true
           git diff --staged --quiet || git commit -m "chore: 更新求职历史记录 $(date +'%Y-%m-%d')"
           git push || true
