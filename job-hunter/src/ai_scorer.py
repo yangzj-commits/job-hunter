@@ -120,11 +120,14 @@ def score_jobs_with_gemini(jobs: list[dict]) -> list[dict]:
         prompt = _build_scoring_prompt(batch)
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
                f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
-        payload = {
+ payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048},
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 2048,
+                "responseMimeType": "application/json",
+            },
         }
-
         try:
             resp = requests.post(url, json=payload, timeout=60)
             resp.raise_for_status()
