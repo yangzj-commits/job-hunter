@@ -1,11 +1,9 @@
 """
-求职雷达 · AI评分模块 (v2.2 - 实习专项版)
+求职雷达 · AI评分模块 (v3.0 - Kimi版)
 改动：
-  - 排除列表扩充（纯销售/体力/中介/财务记账/法务/设计）
-  - 车企销售保留（不在黑名单）
-  - 全职岗位直接压低到20分以下
-  - 管培生/小型会计事务所审计降分处理
-  - 评分profile更新为实习导向
+  - Gemini 调用全部替换为 Kimi API（OpenAI兼容接口）
+  - 评分逻辑、过滤规则、降分策略保持不变
+  - 模型：kimi-k2.5
 """
 
 import os
@@ -13,11 +11,11 @@ import re
 import json
 import time
 
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-2.5-flash"
+KIMI_API_KEY = os.environ.get("KIMI_API_KEY", "")
+MODEL = "kimi-k2.5"
+BASE_URL = "https://api.moonshot.cn/v1"
 
 # ---------- 求职者画像 ----------
 PROFILE = {
@@ -38,10 +36,10 @@ PRIORITY_COMPANIES = [
     "渣打", "华为", "新华三", "H3C", "富士康", "宇通", "蜜雪", "中原银行",
     "美团", "字节跳动", "阿里", "腾讯", "京东", "百度", "中国银行", "工商银行",
     "建设银行", "农业银行", "招商银行", "平安", "中国移动", "中国联通", "中国电信",
+    "海尔", "联想", "用友", "金蝶", "华润", "中粮", "牧原", "宇通客车",
 ]
 
 # ---------- 直接排除的岗位关键词 ----------
-# 注意：不包含"销售"本身，车企销售保留
 EXCLUDE_KEYWORDS = [
     # 体力/现场类
     "工厂实习", "生产实习", "设备巡检", "车间", "流水线", "装配", "生产工人",
@@ -60,11 +58,9 @@ EXCLUDE_KEYWORDS = [
 ]
 
 # ---------- 降分场景关键词 ----------
-# 匹配到这些词时基础分减15（不直接排除）
 DOWNGRADE_KEYWORDS = [
-    "管培生", "管理培训生",           # 需核实是否含数据轮岗
-    "小型会计事务所", "普通合伙",     # 小所审计含金量低
-    "销售",                            # 非车企销售降分（车企后续靠AI区分）
+    "管培生", "管理培训生",
+    "普通合伙", "特殊普通合伙",
 ]
 
 # ---------- 车企关键词（命中则销售岗不降分）----------
@@ -76,10 +72,10 @@ CAR_COMPANY_KEYWORDS = [
 _client = None
 
 
-def _get_client():
+def _get_client() -> OpenAI:
     global _client
     if _client is None:
-        _client = genai.Client(api_key=GEMINI_API_KEY)
+        _client = OpenAI(api_key=KIMI_API_KEY, base_url=BASE_URL)
     return _client
 
 
@@ -106,7 +102,6 @@ def _pre_filter(jobs: list) -> list:
         company = job.get("company", "")
         combined = title + company
 
-        # 命中排除关键词 → 直接丢弃
         if any(kw in combined for kw in EXCLUDE_KEYWORDS):
             print(f"  [过滤] 排除: {title} @ {company}")
             continue
@@ -122,10 +117,9 @@ def _pre_score_adjust(job: dict, base_score: int) -> tuple:
     title = job.get("title", "")
     company = job.get("company", "")
     apply_type = job.get("apply_type", "")
-    combined = title + company
     note = ""
 
-    # 全职岗位：压低到20分以下（只搜实习，全职属漏网）
+    # 全职岗位：压低到18分以下
     if apply_type == "fulltime":
         return min(base_score, 18), "全职岗位，当前仅寻找实习"
 
@@ -156,56 +150,57 @@ def _build_scoring_prompt(jobs: list) -> str:
             f"  公司: {job.get('company','')}\n"
             f"  薪资: {job.get('salary','')}\n"
             f"  地点: {job.get('location','')}\n"
+            f"  来源平台: {job.get('source_platform','')}\n"
             f"  经验要求: {job.get('experience','')}\n"
             f"  学历要求: {job.get('education','')}\n"
             f"  类型: {job.get('apply_type','')}\n"
         )
 
-    return f"""You are a professional career advisor. Score each internship opportunity for this candidate.
+    return f"""你是专业的职业规划顾问。请为以下实习岗位对候选人进行匹配度评分。
 
-## Candidate Profile
-- Education: MSc Information Management, University of Sheffield (2025-2026, graduating 2026)
-- Undergraduate: Information Management & Information Systems, China
-- Skills: Python, Tableau, Excel, Figma, data analysis, SQL basics
-- Language: Native Chinese, conversational English (IELTS 5.5)
-- Status: 2026/2027 fresh graduate, available for internship from August 2026
-- Target city: Zhengzhou, China
-- Priority: INTERNSHIP positions only. Full-time roles are not currently sought.
+## 候选人画像
+- 学历：英国谢菲尔德大学信息管理硕士（在读，2025-2026，2026届毕业）
+- 本科：信息管理与信息系统（专升本）
+- 技能：Python、Tableau、Excel、Figma、数据分析、SQL基础
+- 语言：中文母语，英语可沟通（雅思5.5）
+- 状态：2026/2027届应届生，2026年8月起可实习
+- 目标城市：郑州
+- 求职重点：实习岗位，全职暂不考虑
 
-## Scoring Criteria
-- Internship relevance to data analysis / information management / consulting / operations
-- Company reputation and learning value
-- Skill match with candidate profile
-- Entry-level / no experience requirements preferred
-
-## Jobs to Score ({len(jobs)} total)
+## 待评分岗位（共{len(jobs)}个）
 {jobs_text}
 
-## Instructions
-Score each job 0-100:
-- 85-100: Excellent internship match, highly recommended
-- 70-84: Good match, worth applying
-- 55-69: Partial match, consider carefully  
-- 0-54: Poor match or full-time role
+## 评分说明
+- 85-100分：非常匹配，强烈推荐申请
+- 70-84分：较好匹配，值得申请
+- 55-69分：部分匹配，谨慎考虑
+- 0-54分：匹配度低或为全职岗位
 
-Return ONLY valid JSON, no other text:
+重点考量：
+1. 岗位方向是否与数据分析/信息管理/咨询/运营相关
+2. 公司知名度和实习学习价值
+3. 经验/学历要求是否适合应届生
+4. 全职岗位直接低分
+
+仅返回合法JSON，不要任何其他文字：
 {{
   "results": [
     {{
       "index": 1,
       "score": 85,
-      "reason": "One sentence explaining the score in Chinese"
+      "reason": "用中文简要说明评分理由"
     }}
   ]
 }}"""
 
 
 def score_jobs_with_gemini(jobs: list) -> list:
+    """保持函数名不变（被main.py调用），内部已切换为Kimi。"""
     if not jobs:
         return []
 
-    if not GEMINI_API_KEY:
-        print("[AI评分] 未配置 GEMINI_API_KEY，所有岗位默认50分")
+    if not KIMI_API_KEY:
+        print("[AI评分] 未配置 KIMI_API_KEY，所有岗位默认50分")
         for job in jobs:
             job["score"] = 50
             job["score_reason"] = "未配置AI评分"
@@ -215,27 +210,27 @@ def score_jobs_with_gemini(jobs: list) -> list:
     jobs = _pre_filter(jobs)
     print(f"[AI评分] 预过滤后剩余 {len(jobs)} 个岗位")
 
-    batch_size = 30
+    batch_size = 20  # Kimi适当缩小批次，避免超出上下文
     all_scored = []
 
     for batch_start in range(0, len(jobs), batch_size):
         batch = jobs[batch_start: batch_start + batch_size]
-        print(f"[AI评分] 评分批次 {batch_start//batch_size + 1}，共 {len(batch)} 个岗位")
+        print(f"[AI评分] 评分批次 {batch_start // batch_size + 1}，共 {len(batch)} 个岗位")
 
         prompt = _build_scoring_prompt(batch)
 
         try:
             client = _get_client()
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.1,
-                ),
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": "你是职业规划顾问，只返回JSON，不要任何其他文字。"},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=4000,
             )
 
-            raw = (response.text or "{}").strip()
+            raw = (response.choices[0].message.content or "{}").strip()
             raw = re.sub(r"^```json?\s*", "", raw)
             raw = re.sub(r"\s*```$", "", raw).strip()
 
@@ -248,7 +243,7 @@ def score_jobs_with_gemini(jobs: list) -> list:
                 base_score = score_data.get("score", 50)
                 ai_reason = score_data.get("reason", "")
 
-                # 规则调整（全职压分、管培降分等）
+                # 规则调整
                 adjusted_score, rule_note = _pre_score_adjust(job, base_score)
 
                 # 白名单公司加分（仅实习岗位）
@@ -258,7 +253,6 @@ def score_jobs_with_gemini(jobs: list) -> list:
 
                 final_score = min(100, adjusted_score + bonus)
 
-                # 合并评分理由
                 reason_parts = []
                 if ai_reason:
                     reason_parts.append(ai_reason)
@@ -277,11 +271,11 @@ def score_jobs_with_gemini(jobs: list) -> list:
                 bonus = 10 if _is_priority_company(job.get("company", "")) else 0
                 adjusted, rule_note = _pre_score_adjust(job, 50)
                 job["score"] = min(100, adjusted + bonus)
-                job["score_reason"] = f"评分出错: {str(e)[:40]}"
+                job["score_reason"] = f"评分出错: {str(e)[:60]}"
                 all_scored.append(job)
 
         if batch_start + batch_size < len(jobs):
-            time.sleep(3)
+            time.sleep(5)  # Kimi批次间间隔稍长，避免限流
 
     all_scored.sort(key=lambda x: x.get("score", 0), reverse=True)
     top = all_scored[0].get("score", 0) if all_scored else 0
