@@ -1,9 +1,10 @@
 """
-求职雷达 · AI评分模块 (v3.0 - Kimi版)
+求职雷达 · AI评分模块 (v3.1 - Kimi thinking版)
 改动：
-  - Gemini 调用全部替换为 Kimi API（OpenAI兼容接口）
-  - 评分逻辑、过滤规则、降分策略保持不变
-  - 模型：kimi-k2.5
+  - 评分调用显式开启 thinking 模式（budget_tokens=2000）
+  - thinking 模式不与 $web_search 冲突，评分场景可安全使用
+  - max_tokens 调高至 6000，为 thinking 推理过程预留空间
+  - 其余逻辑（过滤规则、降分策略、白名单加分）保持不变
 """
 
 import os
@@ -16,6 +17,9 @@ from openai import OpenAI
 KIMI_API_KEY = os.environ.get("KIMI_API_KEY", "")
 MODEL = "kimi-k2.5"
 BASE_URL = "https://api.moonshot.cn/v1"
+
+# thinking 模式配置（评分专用，不用于搜索）
+THINKING_ENABLED = {"thinking": {"type": "enabled", "budget_tokens": 2000}}
 
 # ---------- 求职者画像 ----------
 PROFILE = {
@@ -55,12 +59,6 @@ EXCLUDE_KEYWORDS = [
     "平面设计", "UI设计实习", "视觉设计实习", "美工实习",
     # 其他明显不符
     "司机", "保安", "厨师", "保洁",
-]
-
-# ---------- 降分场景关键词 ----------
-DOWNGRADE_KEYWORDS = [
-    "管培生", "管理培训生",
-    "普通合伙", "特殊普通合伙",
 ]
 
 # ---------- 车企关键词（命中则销售岗不降分）----------
@@ -156,31 +154,34 @@ def _build_scoring_prompt(jobs: list) -> str:
             f"  类型: {job.get('apply_type','')}\n"
         )
 
-    return f"""你是专业的职业规划顾问。请为以下实习岗位对候选人进行匹配度评分。
+    return f"""你是专业的职业规划顾问。请认真分析以下实习岗位，对候选人进行匹配度评分。
 
 ## 候选人画像
 - 学历：英国谢菲尔德大学信息管理硕士（在读，2025-2026，2026届毕业）
-- 本科：信息管理与信息系统（专升本）
+- 本科：信息管理与信息系统（专升本，河南财经政法大学）
 - 技能：Python、Tableau、Excel、Figma、数据分析、SQL基础
-- 语言：中文母语，英语可沟通（雅思5.5）
+- 语言：中文母语，英语可沟通（雅思5.5，不适合全英文工作环境）
 - 状态：2026/2027届应届生，2026年8月起可实习
 - 目标城市：郑州
-- 求职重点：实习岗位，全职暂不考虑
+- 求职重点：实习岗位为主，全职暂不考虑
 
 ## 待评分岗位（共{len(jobs)}个）
 {jobs_text}
 
-## 评分说明
+## 评分标准（0-100分）
 - 85-100分：非常匹配，强烈推荐申请
 - 70-84分：较好匹配，值得申请
 - 55-69分：部分匹配，谨慎考虑
-- 0-54分：匹配度低或为全职岗位
+- 0-54分：匹配度低（含全职岗位）
 
-重点考量：
-1. 岗位方向是否与数据分析/信息管理/咨询/运营相关
-2. 公司知名度和实习学习价值
-3. 经验/学历要求是否适合应届生
-4. 全职岗位直接低分
+## 评分重点考量
+1. 岗位方向是否与数据分析/信息管理/咨询/运营/审计相关
+2. 公司知名度、规模和实习学习价值
+3. 经验/学历要求是否适合应届硕士生
+4. 全职岗位直接低分（<20分）
+5. 英语要求高的岗位适当降分（候选人英语为可沟通水平）
+
+请仔细思考每个岗位的匹配情况后再给出评分，评分理由用中文简要说明。
 
 仅返回合法JSON，不要任何其他文字：
 {{
@@ -188,14 +189,14 @@ def _build_scoring_prompt(jobs: list) -> str:
     {{
       "index": 1,
       "score": 85,
-      "reason": "用中文简要说明评分理由"
+      "reason": "用中文简要说明评分理由（1-2句话）"
     }}
   ]
 }}"""
 
 
 def score_jobs_with_gemini(jobs: list) -> list:
-    """保持函数名不变（被main.py调用），内部已切换为Kimi。"""
+    """保持函数名不变（被main.py调用），内部已切换为Kimi + thinking模式。"""
     if not jobs:
         return []
 
@@ -210,12 +211,12 @@ def score_jobs_with_gemini(jobs: list) -> list:
     jobs = _pre_filter(jobs)
     print(f"[AI评分] 预过滤后剩余 {len(jobs)} 个岗位")
 
-    batch_size = 20  # Kimi适当缩小批次，避免超出上下文
+    batch_size = 20
     all_scored = []
 
     for batch_start in range(0, len(jobs), batch_size):
         batch = jobs[batch_start: batch_start + batch_size]
-        print(f"[AI评分] 评分批次 {batch_start // batch_size + 1}，共 {len(batch)} 个岗位")
+        print(f"[AI评分] 评分批次 {batch_start // batch_size + 1}，共 {len(batch)} 个岗位（thinking模式）")
 
         prompt = _build_scoring_prompt(batch)
 
@@ -224,10 +225,11 @@ def score_jobs_with_gemini(jobs: list) -> list:
             response = client.chat.completions.create(
                 model=MODEL,
                 messages=[
-                    {"role": "system", "content": "你是职业规划顾问，只返回JSON，不要任何其他文字。"},
+                    {"role": "system", "content": "你是职业规划顾问，请认真分析后只返回JSON，不要任何其他文字。"},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=4000,
+                max_tokens=6000,            # thinking 推理过程占用额外 token
+                extra_body=THINKING_ENABLED,  # 开启 thinking，提升评分质量
             )
 
             raw = (response.choices[0].message.content or "{}").strip()
@@ -243,7 +245,7 @@ def score_jobs_with_gemini(jobs: list) -> list:
                 base_score = score_data.get("score", 50)
                 ai_reason = score_data.get("reason", "")
 
-                # 规则调整
+                # 规则调整（全职压分、管培降分等）
                 adjusted_score, rule_note = _pre_score_adjust(job, base_score)
 
                 # 白名单公司加分（仅实习岗位）
@@ -275,9 +277,9 @@ def score_jobs_with_gemini(jobs: list) -> list:
                 all_scored.append(job)
 
         if batch_start + batch_size < len(jobs):
-            time.sleep(5)  # Kimi批次间间隔稍长，避免限流
+            time.sleep(5)  # 批次间间隔，避免限流
 
     all_scored.sort(key=lambda x: x.get("score", 0), reverse=True)
     top = all_scored[0].get("score", 0) if all_scored else 0
-    print(f"[AI评分] ✓ 评分完成，最高分: {top}")
+    print(f"[AI评分] ✓ 评分完成（thinking模式），最高分: {top}")
     return all_scored
