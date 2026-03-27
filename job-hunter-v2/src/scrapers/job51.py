@@ -1,14 +1,15 @@
 """
-求职雷达 · 双轨搜索引擎 (v2.1 - 质量白名单版)
+求职雷达 · 双轨搜索引擎 (v2.2 - 实习专项 + 严格白名单版)
 ============================================================
-v2.1 改进：
-  - 自动学习白名单增加质量筛选，符合 B/C/D/E/F 任一条件才加入：
-      B. 上市公司（A股/港股/美股等）
-      C. 外资独资或中外合资企业
-      D. 世界500强或中国500强
-      E. 所在行业国内市场份额前5名
-      F. 有独立校园招聘体系（官方校招专页或正规offer流程）
-  - 不符合任何条件的公司（本地小公司等）一律不加入白名单
+v2.2 改动：
+  - 公司质量筛选改为四方案并行（B或C或D或E任一通过即合格）：
+      方案1(B或C)：上市公司 或 外资/合资
+      方案2(B且F)：上市公司 且 有独立校招体系
+      方案3(D或C或E)：500强 或 外资 或 行业前5
+      方案4(D或C)：500强 或 外资
+      → 合并等效：B 或 C 或 D 或 E 任一满足即合格
+  - 日志明确显示通过了哪个方案
+  - 不确定一律不通过，宁缺毋滥
 """
 
 import os
@@ -68,6 +69,12 @@ COMPANY_CAREER_URLS = {
     "宇通": "https://zhaopin.yutong.com/",
     "蜜雪": "https://careers.mixueglobal.com/",
     "中原银行": "https://www.zynbank.com/zhaopin/index.html",
+    "美团": "https://zhaopin.meituan.com/",
+    "字节跳动": "https://jobs.bytedance.com/campus",
+    "华润": "https://campus.crc.com.cn/",
+    "中国银行": "https://campus.boc.cn/",
+    "招商银行": "https://career.cmbchina.com/campus",
+    "平安": "https://campus.pingan.com/",
 }
 
 JOB_PAGE_KEYWORDS = [
@@ -180,16 +187,17 @@ def _search_with_grounding(query: str, delay: float = 2.5) -> dict:
 
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
 
-    prompt = f"""你是专业的招聘信息搜索助手，服务于一名正在找郑州工作的应届硕士生。
+    prompt = f"""你是专业的招聘信息搜索助手，服务于一名正在找郑州实习工作的应届硕士生（2026/2027届）。
 
 请搜索以下招聘信息并汇报结果：
 {query}
 
 要求：
 1. 只报告你通过搜索实际找到的职位，不要凭记忆推断或编造
-2. 对每个职位，请说明：职位名称、公司、地点、薪资（有则报）、经验要求、学历要求、职位类型（实习或全职）
-3. 如果没有搜索到郑州相关职位，请直接说"未找到郑州相关职位"
-4. 搜索重点：郑州、2026年、应届生/实习"""
+2. 重点关注实习岗位（internship），全职岗位不是优先目标
+3. 对每个职位，请说明：职位名称、公司、地点、薪资（有则报）、经验要求、学历要求、职位类型
+4. 如果没有搜索到郑州相关实习职位，请直接说"未找到郑州相关实习职位"
+5. 搜索重点：郑州、2026年、2027届、应届生实习"""
 
     try:
         client = _get_client()
@@ -288,7 +296,7 @@ def _extract_jobs_as_json(search_result: dict) -> list:
     "salary": "8K-15K/月",
     "experience": "应届硕士",
     "education": "硕士及以上",
-    "apply_type": "fulltime",
+    "apply_type": "internship",
     "source_domain": "liepin.com"
   }}
 ]
@@ -348,7 +356,7 @@ def _post_process_jobs(raw_jobs: list, search_result: dict, source_label: str) -
             "salary": job.get("salary", "面议"),
             "experience": job.get("experience", ""),
             "education": job.get("education", ""),
-            "apply_type": job.get("apply_type", "fulltime"),
+            "apply_type": job.get("apply_type", "internship"),
             "source": source_label,
             "url": best_url,
             "url_type": url_type,
@@ -365,47 +373,59 @@ def _job_hash(job: dict) -> str:
 
 
 # ============================================================
-# 公司质量筛选（v2.1 新增）
+# 公司质量筛选（v2.2 - 四方案并行）
 # ============================================================
 
 def _is_quality_company_batch(company_names: list) -> dict:
     """
-    批量判断公司是否符合白名单质量标准，B/C/D/E/F 任一符合即为合格。
-    返回 {公司名: True/False}
+    批量判断公司是否符合白名单质量标准。
+    四方案并行，B 或 C 或 D 或 E 任一满足即合格：
 
-    标准：
-      B. 上市公司（A股/港股/美股/纽交所/纳斯达克等任一交易所上市）
+    方案1 (B或C)：上市公司 或 外资/合资企业
+    方案2 (B且F)：上市公司 且 有独立校招体系（已被B覆盖，F作为加权参考）
+    方案3 (D或C或E)：500强 或 外资 或 行业前5
+    方案4 (D或C)：500强 或 外资
+
+    合并等效条件：B 或 C 或 D 或 E
+      B. 上市公司（A股/港股/美股/纽交所/纳斯达克等）
       C. 外资独资或中外合资企业
       D. 世界500强或中国500强成员
       E. 所在行业国内市场份额前5名
-      F. 有独立的校园招聘体系（官方校招专页或正规offer流程）
     """
     if not company_names:
         return {}
 
     names_text = "\n".join(f"- {n}" for n in company_names)
 
-    prompt = f"""你是企业信息核查助手。请判断以下每家公司是否符合至少一条标准：
+    prompt = f"""你是企业信息核查助手。请对以下每家公司逐一判断是否符合至少一个条件：
 
-标准（符合任意一条即为"合格"）：
-B. 上市公司（在A股、港股、美股、纽交所、纳斯达克等任一交易所上市）
-C. 外资独资或中外合资企业
-D. 世界500强或中国500强成员
-E. 所在行业国内市场份额前5名
-F. 有独立的校园招聘体系（官方校招专页或正规offer流程）
+【判断条件】（符合任意一条即为"合格"）
+B. 上市公司：在A股、港股、美股、纽交所、纳斯达克等任一正规交易所上市
+C. 外资或合资：外商独资企业，或中外合资企业（外方持股比例显著）
+D. 500强成员：世界500强 或 中国500强（福布斯/财富榜单）
+E. 行业前5：在其主营业务所在行业，国内市场份额/品牌影响力位列前5名
 
-待判断公司列表：
+【待判断公司列表】
 {names_text}
 
-重要原则：
-- 只基于你掌握的客观事实判断
-- 不确定或无法核实的公司，统一判为不合格（qualified: false）
-- 宁缺毋滥，避免将小型本地公司误判为合格
+【重要原则】
+- 必须基于你掌握的确定事实作判断，不得猜测或推断
+- 对不熟悉、无法确认的公司，一律判为不合格（qualified: false）
+- 宁缺毋滥：宁可漏掉真正合格的公司，也不能让不合格的公司混入
+- 郑州本地的中小型公司、未上市民营企业，如无法确认符合条件，一律判为不合格
 
-返回纯JSON对象，不要任何其他文字：
+【返回格式】纯JSON对象，不要任何其他文字：
 {{
-  "公司名": {{"qualified": true, "reason": "上市公司(A股上交所)", "matched_criteria": "B"}},
-  "公司名2": {{"qualified": false, "reason": "小型本地公司，不符合任何标准", "matched_criteria": ""}}
+  "公司名": {{
+    "qualified": true,
+    "matched_criteria": "B",
+    "reason": "在A股上海证券交易所上市（股票代码：XXXXXX）"
+  }},
+  "公司名2": {{
+    "qualified": false,
+    "matched_criteria": "",
+    "reason": "郑州本地中小企业，无法确认符合任何条件"
+  }}
 }}"""
 
     try:
@@ -428,11 +448,23 @@ F. 有独立的校园招聘体系（官方校招专页或正规offer流程）
         for name in company_names:
             info = result.get(name, {})
             is_qualified = info.get("qualified", False)
+            criteria = info.get("matched_criteria", "")
+            reason = info.get("reason", "")
             qualified[name] = is_qualified
+
+            # 方案标签映射
+            scheme_label = {
+                "B": "方案1/2(上市)",
+                "C": "方案1/3/4(外资)",
+                "D": "方案3/4(500强)",
+                "E": "方案3(行业前5)",
+            }.get(criteria, f"条件{criteria}")
+
             if is_qualified:
-                print(f"    ✓ {name}：{info.get('reason', '')} [{info.get('matched_criteria', '')}]")
+                print(f"    ✓ {name}：{reason} → 通过{scheme_label}")
             else:
-                print(f"    ✗ {name}：{info.get('reason', '不符合任何标准')}")
+                print(f"    ✗ {name}：{reason}")
+
         return qualified
 
     except Exception as e:
@@ -441,18 +473,18 @@ F. 有独立的校园招聘体系（官方校招专页或正规offer流程）
 
 
 # ============================================================
-# 白名单自动更新（v2.1 带质量筛选）
+# 白名单自动更新（v2.2 严格筛选）
 # ============================================================
 
 def _update_whitelist_with_new_companies(jobs: list, whitelist: list, config: dict) -> list:
     """
-    将有搜索证据的新公司，经质量筛选（B/C/D/E/F 任一符合）后加入白名单。
-    不符合任何标准的公司（本地小公司等）一律排除。
+    将有搜索证据的新公司，经四方案并行质量筛选后加入白名单。
+    B 或 C 或 D 或 E 任一满足才加入，其余一律排除。
     """
     if not config.get("AUTO_UPDATE_WHITELIST", True):
         return whitelist
 
-    max_size = config.get("WHITELIST_MAX_SIZE", 50)
+    max_size = config.get("WHITELIST_MAX_SIZE", 80)
     existing_names = {w.get("name", "").strip() for w in whitelist}
 
     # 收集本次新出现的公司名（去重）
@@ -467,9 +499,9 @@ def _update_whitelist_with_new_companies(jobs: list, whitelist: list, config: di
     if not candidate_names:
         return whitelist
 
-    print(f"[自动学习] 发现 {len(candidate_names)} 家新公司，开始质量筛选...")
+    print(f"[自动学习] 发现 {len(candidate_names)} 家新公司，开始四方案并行质量筛选...")
 
-    # 批量质量判断（每批最多20家，防止 prompt 过长）
+    # 批量质量判断（每批最多20家，防止prompt过长）
     batch_size = 20
     qualified_map = {}
     for i in range(0, len(candidate_names), batch_size):
@@ -512,8 +544,8 @@ def _update_whitelist_with_new_companies(jobs: list, whitelist: list, config: di
 def fetch_all_jobs(config: dict, whitelist: list) -> tuple:
     """
     主函数：执行双轨搜索，返回 (jobs, updated_whitelist)
-    Track A：扩展关键词 × 招聘平台搜索
-    Track B：白名单公司 × 定向岗位搜索
+    Track A：实习专项关键词 × 招聘平台搜索
+    Track B：白名单公司 × 定向实习岗位搜索
     """
     all_jobs = []
     seen_hashes = set()
@@ -532,9 +564,9 @@ def fetch_all_jobs(config: dict, whitelist: list) -> tuple:
     )
 
     # ── Track A：关键词搜索 ──────────────────────────────────
-    print("[搜索] 轨道A: 关键词搜索开始")
+    print("[搜索] 轨道A: 实习关键词搜索开始")
     for kw in keywords:
-        query = f"郑州 {kw} 招聘 2026 ({site_filter})"
+        query = f"郑州 {kw} 招聘 ({site_filter})"
         print(f"  ▸ {kw}")
         search_result = _search_with_grounding(query)
         if search_result["has_grounding"]:
@@ -548,12 +580,16 @@ def fetch_all_jobs(config: dict, whitelist: list) -> tuple:
     print(f"  轨道A完成，当前共 {len(all_jobs)} 个岗位\n")
 
     # ── Track B：白名单公司定向搜索 ──────────────────────────
-    print("[搜索] 轨道B: 白名单公司定向搜索开始")
+    print("[搜索] 轨道B: 白名单公司定向实习搜索开始")
     for company in whitelist:
         name = company.get("name", "") if isinstance(company, dict) else str(company)
         if not name:
             continue
-        query = f"{name} 郑州 2026 招聘 应届生 实习 (site:liepin.com OR site:zhipin.com OR site:{name.lower()}.com)"
+        query = (
+            f"{name} 郑州 2026 实习生 招聘 "
+            f"(site:liepin.com OR site:zhipin.com OR site:maimai.cn "
+            f"OR site:51job.com OR site:{name.lower()}.com)"
+        )
         print(f"  ▸ {name}")
         search_result = _search_with_grounding(query)
         if search_result["has_grounding"]:
