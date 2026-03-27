@@ -1,15 +1,15 @@
 """
-求职雷达 · 双轨搜索引擎 (v2.2 - 实习专项 + 严格白名单版)
+求职雷达 · 双轨搜索引擎 (v3.0 - Kimi 联网搜索版)
 ============================================================
-v2.2 改动：
-  - 公司质量筛选改为四方案并行（B或C或D或E任一通过即合格）：
-      方案1(B或C)：上市公司 或 外资/合资
-      方案2(B且F)：上市公司 且 有独立校招体系
-      方案3(D或C或E)：500强 或 外资 或 行业前5
-      方案4(D或C)：500强 或 外资
-      → 合并等效：B 或 C 或 D 或 E 任一满足即合格
-  - 日志明确显示通过了哪个方案
-  - 不确定一律不通过，宁缺毋滥
+v3.0 主要变化：
+  - 从 Gemini Google Search Grounding 切换到 Kimi $web_search
+  - Kimi 服务器在中国境内，可直接搜索 Boss直聘/猎聘/前程无忧等平台
+  - 一步法：搜索 + 结构化提取合并为单次对话，减少 API 调用次数
+  - 宁缺毋滥：Kimi 未触发 $web_search（finish_reason != tool_calls）则丢弃
+  - URL 直接由 Kimi 从搜索结果中提取，不再需要解析 groundingChunks 重定向
+  - site filter 放宽，不再强制限定搜索平台域名
+  - 公司质量筛选改为 Kimi 普通调用（无需联网，靠模型知识判断）
+  - 四方案并行白名单筛选逻辑保持不变（B 或 C 或 D 或 E）
 """
 
 import os
@@ -19,23 +19,24 @@ import time
 import hashlib
 import requests
 
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
 # ============================================================
 # 初始化
 # ============================================================
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-MODEL = "gemini-2.5-flash"
+KIMI_API_KEY = os.environ.get("KIMI_API_KEY", "")
+MODEL = "kimi-k2.5"
+BASE_URL = "https://api.moonshot.cn/v1"
 
 _client = None
 
-def _get_client():
+
+def _get_client() -> OpenAI:
     global _client
     if _client is None:
-        if not GEMINI_API_KEY:
-            raise RuntimeError("未设置 GEMINI_API_KEY 环境变量")
-        _client = genai.Client(api_key=GEMINI_API_KEY)
+        if not KIMI_API_KEY:
+            raise RuntimeError("未设置 KIMI_API_KEY 环境变量")
+        _client = OpenAI(api_key=KIMI_API_KEY, base_url=BASE_URL)
     return _client
 
 
@@ -75,6 +76,9 @@ COMPANY_CAREER_URLS = {
     "中国银行": "https://campus.boc.cn/",
     "招商银行": "https://career.cmbchina.com/campus",
     "平安": "https://campus.pingan.com/",
+    "海尔": "https://career.haier.com/",
+    "联想": "https://talent.lenovo.com.cn/",
+    "用友": "https://career.yonyou.com/",
 }
 
 JOB_PAGE_KEYWORDS = [
@@ -102,33 +106,6 @@ CAREER_PAGE_KEYWORDS = [
 # URL 工具函数
 # ============================================================
 
-def resolve_redirect_url(redirect_url: str, timeout: int = 6) -> str:
-    """跟随重定向，获取真实目标URL。"""
-    if not redirect_url:
-        return ""
-    try:
-        resp = requests.head(
-            redirect_url,
-            allow_redirects=True,
-            timeout=timeout,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; JobRadar/2.0)"},
-        )
-        return resp.url
-    except Exception:
-        try:
-            resp = requests.get(
-                redirect_url,
-                allow_redirects=True,
-                timeout=timeout,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; JobRadar/2.0)"},
-                stream=True,
-            )
-            resp.close()
-            return resp.url
-        except Exception:
-            return redirect_url
-
-
 def classify_url(url: str) -> str:
     """判断URL类型：job_page / career_page / other"""
     if not url:
@@ -152,177 +129,144 @@ def get_company_fallback_url(company_name: str) -> str:
     return ""
 
 
-def pick_best_url(grounding_urls: list, company_name: str) -> tuple:
-    """从grounding URL列表中选出最优链接。返回 (url, url_type)"""
-    job_page = ""
-    career_page = ""
-
-    for u in grounding_urls:
-        real_url = u.get("real_url", "")
-        url_type = u.get("url_type", "other")
-        if url_type == "job_page" and not job_page:
-            job_page = real_url
-        elif url_type == "career_page" and not career_page:
-            career_page = real_url
-
-    if job_page:
-        return job_page, "job_page"
-    if career_page:
-        return career_page, "career_page"
-
-    fallback = get_company_fallback_url(company_name)
-    if fallback:
-        return fallback, "fallback"
-
-    return "", "none"
-
-
 # ============================================================
-# Gemini 调用：Step 1 - 带搜索的自然语言查询
+# Kimi $web_search 一步法搜索
 # ============================================================
 
-def _search_with_grounding(query: str, delay: float = 2.5) -> dict:
-    """开启 google_search 工具搜索，返回文本 + 真实URL列表"""
-    time.sleep(delay)
+SEARCH_TOOLS = [
+    {
+        "type": "builtin_function",
+        "function": {"name": "$web_search"},
+    }
+]
 
-    grounding_tool = types.Tool(google_search=types.GoogleSearch())
+SYSTEM_PROMPT = """你是专业的招聘信息搜索助手，服务于一名正在找郑州实习工作的2026/2027届应届硕士生。
 
-    prompt = f"""你是专业的招聘信息搜索助手，服务于一名正在找郑州实习工作的应届硕士生（2026/2027届）。
+你的任务：
+1. 使用联网搜索工具搜索招聘信息
+2. 只报告你通过搜索实际找到的职位，绝对不能凭记忆推断或编造
+3. 只保留郑州/河南的实习岗位，全职岗位用 fulltime 标注
+4. 将搜索结果整理为JSON格式返回
 
-请搜索以下招聘信息并汇报结果：
-{query}
-
-要求：
-1. 只报告你通过搜索实际找到的职位，不要凭记忆推断或编造
-2. 重点关注实习岗位（internship），全职岗位不是优先目标
-3. 对每个职位，请说明：职位名称、公司、地点、薪资（有则报）、经验要求、学历要求、职位类型
-4. 如果没有搜索到郑州相关实习职位，请直接说"未找到郑州相关实习职位"
-5. 搜索重点：郑州、2026年、2027届、应届生实习"""
-
-    try:
-        client = _get_client()
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[grounding_tool],
-                temperature=1.0,
-            ),
-        )
-
-        text = response.text or ""
-        urls = []
-        search_queries = []
-
-        try:
-            candidate = response.candidates[0]
-            meta = candidate.grounding_metadata
-            if meta:
-                if meta.web_search_queries:
-                    search_queries = list(meta.web_search_queries)
-                if meta.grounding_chunks:
-                    for chunk in meta.grounding_chunks:
-                        if chunk.web and chunk.web.uri:
-                            redirect_url = chunk.web.uri
-                            domain_title = chunk.web.title or ""
-                            real_url = resolve_redirect_url(redirect_url)
-                            url_type = classify_url(real_url)
-                            urls.append({
-                                "redirect_url": redirect_url,
-                                "real_url": real_url,
-                                "domain_title": domain_title,
-                                "url_type": url_type,
-                            })
-        except Exception as e:
-            print(f"    [URL提取] 警告: {e}")
-
-        return {
-            "text": text,
-            "urls": urls,
-            "has_grounding": len(urls) > 0,
-            "search_queries": search_queries,
-            "original_query": query,
-        }
-
-    except Exception as e:
-        print(f"    [搜索] 失败: {str(e)[:80]}")
-        return {
-            "text": "",
-            "urls": [],
-            "has_grounding": False,
-            "search_queries": [],
-            "original_query": query,
-        }
-
-
-# ============================================================
-# Gemini 调用：Step 2 - 从文本提取结构化JSON（不开搜索）
-# ============================================================
-
-def _extract_jobs_as_json(search_result: dict) -> list:
-    """将Step1的自然语言文本提炼为结构化job列表。"""
-    text = search_result.get("text", "")
-    urls = search_result.get("urls", [])
-    has_grounding = search_result.get("has_grounding", False)
-
-    if not text or not has_grounding:
-        return []
-
-    url_ref = ""
-    if urls:
-        url_ref = "\n\n【搜索来源域名参考】\n"
-        for i, u in enumerate(urls):
-            url_ref += f"来源{i+1}: {u['domain_title']} ({u['url_type']})\n"
-
-    prompt = f"""请从以下招聘搜索结果中提取结构化信息，返回JSON数组。
-
-【搜索结果原文】
-{text[:3000]}
-{url_ref}
-
-【提取规则】
-1. 只提取文本中明确提到的职位，不要补充或推断
-2. 只保留郑州或河南的职位
-3. apply_type字段：实习填 "internship"，全职填 "fulltime"
-4. source_domain字段：从【搜索来源域名参考】里选最相关的域名填入，没有填空字符串
-5. salary没有则填 "面议"
-
-【返回格式】纯JSON数组，不要任何其他文字：
+【返回格式】纯JSON数组，不要任何 markdown 标记或其他文字：
 [
-  {{
+  {
     "title": "职位名称",
     "company": "公司全名",
     "location": "郑州",
-    "salary": "8K-15K/月",
-    "experience": "应届硕士",
-    "education": "硕士及以上",
+    "salary": "薪资或面议",
+    "experience": "经验要求",
+    "education": "学历要求",
     "apply_type": "internship",
-    "source_domain": "liepin.com"
-  }}
+    "source_platform": "Boss直聘",
+    "url": "职位链接（有则填完整URL，无则填空字符串）"
+  }
 ]
 
-如果没有找到任何郑州职位，返回空数组 []"""
+如果没有找到任何郑州实习职位，返回空数组 []
+注意：apply_type 只能是 internship 或 fulltime，不能是其他值"""
+
+
+def _search_and_extract_jobs(query: str, delay: float = 3.0) -> dict:
+    """
+    Kimi 一步法：联网搜索 + 直接返回结构化岗位JSON。
+    宁缺毋滥：若 Kimi 未触发 $web_search，直接返回空结果。
+    """
+    time.sleep(delay)
+    client = _get_client()
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": query},
+    ]
 
     try:
-        client = _get_client()
-        response = client.models.generate_content(
+        # ── 第一轮调用：期望 Kimi 触发 $web_search ──────────
+        response = client.chat.completions.create(
             model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            ),
+            messages=messages,
+            tools=SEARCH_TOOLS,
+            max_tokens=8000,
         )
+        choice = response.choices[0]
 
-        raw = (response.text or "[]").strip()
-        raw = re.sub(r"^```json?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw).strip()
+        # 宁缺毋滥：第一次响应必须触发搜索
+        if choice.finish_reason != "tool_calls":
+            print("    ✗ Kimi未触发联网搜索，丢弃结果（宁缺毋滥）")
+            return {"jobs": [], "has_search": False}
 
-        jobs = json.loads(raw)
-        return [j for j in jobs if isinstance(j, dict)] if isinstance(jobs, list) else []
+        # 确认是 $web_search
+        tool_calls = choice.message.tool_calls or []
+        has_web_search = any(tc.function.name == "$web_search" for tc in tool_calls)
+        if not has_web_search:
+            print("    ✗ 未检测到 $web_search 调用，丢弃")
+            return {"jobs": [], "has_search": False}
+
+        # ── 将工具参数提交回 Kimi，让其执行搜索 ─────────────
+        messages.append(choice.message)
+        for tc in tool_calls:
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": tc.function.arguments,
+            })
+
+        # ── 后续轮次：等待 finish_reason=stop ───────────────
+        for turn in range(5):
+            response2 = client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                tools=SEARCH_TOOLS,
+                max_tokens=8000,
+            )
+            choice2 = response2.choices[0]
+
+            if choice2.finish_reason == "stop":
+                text = choice2.message.content or ""
+                jobs = _parse_jobs_from_text(text)
+                return {"jobs": jobs, "has_search": True}
+
+            # 可能触发了额外搜索，继续循环
+            if choice2.finish_reason == "tool_calls":
+                messages.append(choice2.message)
+                for tc in (choice2.message.tool_calls or []):
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": tc.function.arguments,
+                    })
+            else:
+                break
+
+        print("    ✗ 超过最大轮次，丢弃结果")
+        return {"jobs": [], "has_search": False}
 
     except Exception as e:
-        print(f"    [结构化提取] 失败: {e}")
+        print(f"    [搜索] 失败: {str(e)[:100]}")
+        return {"jobs": [], "has_search": False}
+
+
+def _parse_jobs_from_text(text: str) -> list:
+    """从 Kimi 返回的文本中解析 JSON 岗位列表。"""
+    if not text:
+        return []
+    try:
+        # 清除可能残留的 markdown 代码块标记
+        text = text.strip()
+        text = re.sub(r"^```json?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+
+        # 提取第一个 JSON 数组
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        if match:
+            text = match.group(0)
+
+        jobs = json.loads(text)
+        if isinstance(jobs, list):
+            return [j for j in jobs if isinstance(j, dict)]
+        return []
+    except Exception as e:
+        print(f"    [JSON解析] 失败: {e}")
         return []
 
 
@@ -330,41 +274,36 @@ def _extract_jobs_as_json(search_result: dict) -> list:
 # 岗位后处理
 # ============================================================
 
-def _post_process_jobs(raw_jobs: list, search_result: dict, source_label: str) -> list:
-    """合并job和grounding URL，只保留有搜索证据的岗位。"""
-    urls = search_result.get("urls", [])
-    has_grounding = search_result.get("has_grounding", False)
+def _post_process_job(job: dict, source_label: str) -> dict:
+    """标准化单个岗位，补充URL分类和fallback。"""
+    company = job.get("company", "").strip()
+    url = job.get("url", "").strip()
 
-    if not has_grounding:
-        return []
+    # URL分类
+    url_type = classify_url(url)
 
-    result = []
-    for job in raw_jobs:
-        company = job.get("company", "")
-        source_domain = job.get("source_domain", "")
-        matching_urls = [
-            u for u in urls
-            if source_domain and source_domain in u.get("domain_title", "")
-        ] if source_domain else urls
+    # 无URL时查fallback映射表
+    if not url:
+        fallback = get_company_fallback_url(company)
+        if fallback:
+            url = fallback
+            url_type = "career_page"
 
-        best_url, url_type = pick_best_url(matching_urls or urls, company)
-
-        result.append({
-            "title": job.get("title", ""),
-            "company": company,
-            "location": job.get("location", "郑州"),
-            "salary": job.get("salary", "面议"),
-            "experience": job.get("experience", ""),
-            "education": job.get("education", ""),
-            "apply_type": job.get("apply_type", "internship"),
-            "source": source_label,
-            "url": best_url,
-            "url_type": url_type,
-            "grounded": True,
-            "has_url": bool(best_url),
-        })
-
-    return result
+    return {
+        "title": job.get("title", "").strip(),
+        "company": company,
+        "location": job.get("location", "郑州").strip(),
+        "salary": job.get("salary", "面议").strip() or "面议",
+        "experience": job.get("experience", "").strip(),
+        "education": job.get("education", "").strip(),
+        "apply_type": job.get("apply_type", "internship"),
+        "source": source_label,
+        "source_platform": job.get("source_platform", "").strip(),
+        "url": url,
+        "url_type": url_type,
+        "grounded": True,
+        "has_url": bool(url),
+    }
 
 
 def _job_hash(job: dict) -> str:
@@ -373,31 +312,25 @@ def _job_hash(job: dict) -> str:
 
 
 # ============================================================
-# 公司质量筛选（v2.2 - 四方案并行）
+# 公司质量筛选（四方案并行，Kimi 普通调用）
 # ============================================================
 
 def _is_quality_company_batch(company_names: list) -> dict:
     """
     批量判断公司是否符合白名单质量标准。
-    四方案并行，B 或 C 或 D 或 E 任一满足即合格：
-
-    方案1 (B或C)：上市公司 或 外资/合资企业
-    方案2 (B且F)：上市公司 且 有独立校招体系（已被B覆盖，F作为加权参考）
-    方案3 (D或C或E)：500强 或 外资 或 行业前5
-    方案4 (D或C)：500强 或 外资
-
-    合并等效条件：B 或 C 或 D 或 E
-      B. 上市公司（A股/港股/美股/纽交所/纳斯达克等）
-      C. 外资独资或中外合资企业
-      D. 世界500强或中国500强成员
-      E. 所在行业国内市场份额前5名
+    B 或 C 或 D 或 E 任一满足即合格（四方案并行）：
+      方案1 (B或C)：上市公司 或 外资/合资
+      方案2 (B且F)：上市公司 且 有独立校招体系
+      方案3 (D或C或E)：500强 或 外资 或 行业前5
+      方案4 (D或C)：500强 或 外资
+      合并等效：B 或 C 或 D 或 E 任一满足即合格
     """
     if not company_names:
         return {}
 
     names_text = "\n".join(f"- {n}" for n in company_names)
 
-    prompt = f"""你是企业信息核查助手。请对以下每家公司逐一判断是否符合至少一个条件：
+    prompt = f"""你是企业信息核查助手。请判断以下每家公司是否符合至少一个条件：
 
 【判断条件】（符合任意一条即为"合格"）
 B. 上市公司：在A股、港股、美股、纽交所、纳斯达克等任一正规交易所上市
@@ -419,7 +352,7 @@ E. 行业前5：在其主营业务所在行业，国内市场份额/品牌影响
   "公司名": {{
     "qualified": true,
     "matched_criteria": "B",
-    "reason": "在A股上海证券交易所上市（股票代码：XXXXXX）"
+    "reason": "在A股上海证券交易所上市"
   }},
   "公司名2": {{
     "qualified": false,
@@ -430,21 +363,29 @@ E. 行业前5：在其主营业务所在行业，国内市场份额/品牌影响
 
     try:
         client = _get_client()
-        response = client.models.generate_content(
+        # 公司质量判断不需要联网，用普通调用
+        response = client.chat.completions.create(
             model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            ),
+            messages=[
+                {"role": "system", "content": "你是企业信息核查助手，只返回JSON，不要任何其他文字。"},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=4000,
         )
 
-        raw = (response.text or "{}").strip()
+        raw = (response.choices[0].message.content or "{}").strip()
         raw = re.sub(r"^```json?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw).strip()
         result = json.loads(raw)
 
         qualified = {}
+        scheme_map = {
+            "B": "方案1/2(上市)",
+            "C": "方案1/3/4(外资)",
+            "D": "方案3/4(500强)",
+            "E": "方案3(行业前5)",
+        }
+
         for name in company_names:
             info = result.get(name, {})
             is_qualified = info.get("qualified", False)
@@ -452,14 +393,7 @@ E. 行业前5：在其主营业务所在行业，国内市场份额/品牌影响
             reason = info.get("reason", "")
             qualified[name] = is_qualified
 
-            # 方案标签映射
-            scheme_label = {
-                "B": "方案1/2(上市)",
-                "C": "方案1/3/4(外资)",
-                "D": "方案3/4(500强)",
-                "E": "方案3(行业前5)",
-            }.get(criteria, f"条件{criteria}")
-
+            scheme_label = scheme_map.get(criteria, f"条件{criteria}")
             if is_qualified:
                 print(f"    ✓ {name}：{reason} → 通过{scheme_label}")
             else:
@@ -473,7 +407,7 @@ E. 行业前5：在其主营业务所在行业，国内市场份额/品牌影响
 
 
 # ============================================================
-# 白名单自动更新（v2.2 严格筛选）
+# 白名单自动更新
 # ============================================================
 
 def _update_whitelist_with_new_companies(jobs: list, whitelist: list, config: dict) -> list:
@@ -501,7 +435,7 @@ def _update_whitelist_with_new_companies(jobs: list, whitelist: list, config: di
 
     print(f"[自动学习] 发现 {len(candidate_names)} 家新公司，开始四方案并行质量筛选...")
 
-    # 批量质量判断（每批最多20家，防止prompt过长）
+    # 批量质量判断（每批最多20家）
     batch_size = 20
     qualified_map = {}
     for i in range(0, len(candidate_names), batch_size):
@@ -544,8 +478,8 @@ def _update_whitelist_with_new_companies(jobs: list, whitelist: list, config: di
 def fetch_all_jobs(config: dict, whitelist: list) -> tuple:
     """
     主函数：执行双轨搜索，返回 (jobs, updated_whitelist)
-    Track A：实习专项关键词 × 招聘平台搜索
-    Track B：白名单公司 × 定向实习岗位搜索
+    Track A：实习专项关键词搜索（放宽site filter）
+    Track B：白名单公司定向实习搜索
     """
     all_jobs = []
     seen_hashes = set()
@@ -558,24 +492,26 @@ def fetch_all_jobs(config: dict, whitelist: list) -> tuple:
                 all_jobs.append(job)
 
     keywords = config.get("SEARCH_KEYWORDS", [])
-    site_filter = config.get(
-        "SEARCH_SITE_FILTER",
-        "site:liepin.com OR site:zhipin.com OR site:maimai.cn"
-    )
 
     # ── Track A：关键词搜索 ──────────────────────────────────
-    print("[搜索] 轨道A: 实习关键词搜索开始")
+    print("[搜索] 轨道A: 实习关键词搜索开始（Kimi联网）")
     for kw in keywords:
-        query = f"郑州 {kw} 招聘 ({site_filter})"
+        # 放宽site filter：不再强制限定平台域名，Kimi境内搜索可直接命中各平台
+        query = (
+            f"搜索郑州 {kw} 招聘信息，"
+            f"重点查找Boss直聘、猎聘、前程无忧、智联招聘等平台上的郑州实习岗位，"
+            f"只返回有明确招聘信息的职位。"
+        )
         print(f"  ▸ {kw}")
-        search_result = _search_with_grounding(query)
-        if search_result["has_grounding"]:
-            raw_jobs = _extract_jobs_as_json(search_result)
-            processed = _post_process_jobs(raw_jobs, search_result, "关键词搜索")
+        result = _search_and_extract_jobs(query)
+
+        if result["has_search"] and result["jobs"]:
+            processed = [_post_process_job(j, "关键词搜索") for j in result["jobs"]]
             add_jobs(processed)
-            print(f"    ✓ 有证据，提取到 {len(processed)} 个岗位")
-        else:
-            print(f"    ✗ 无搜索证据，跳过（宁缺毋滥）")
+            print(f"    ✓ 搜索成功，提取到 {len(processed)} 个岗位")
+        elif result["has_search"]:
+            print(f"    ✓ 搜索成功，未找到郑州相关实习岗位")
+        # has_search=False 时已在函数内打印
 
     print(f"  轨道A完成，当前共 {len(all_jobs)} 个岗位\n")
 
@@ -586,19 +522,19 @@ def fetch_all_jobs(config: dict, whitelist: list) -> tuple:
         if not name:
             continue
         query = (
-            f"{name} 郑州 2026 实习生 招聘 "
-            f"(site:liepin.com OR site:zhipin.com OR site:maimai.cn "
-            f"OR site:51job.com OR site:{name.lower()}.com)"
+            f"搜索{name}在郑州的2026年实习生招聘信息，"
+            f"查找Boss直聘、猎聘、前程无忧或{name}官网上的郑州实习岗位，"
+            f"面向2026届/2027届应届生。"
         )
         print(f"  ▸ {name}")
-        search_result = _search_with_grounding(query)
-        if search_result["has_grounding"]:
-            raw_jobs = _extract_jobs_as_json(search_result)
-            processed = _post_process_jobs(raw_jobs, search_result, "定向搜索")
+        result = _search_and_extract_jobs(query)
+
+        if result["has_search"] and result["jobs"]:
+            processed = [_post_process_job(j, "定向搜索") for j in result["jobs"]]
             add_jobs(processed)
-            print(f"    ✓ 有证据，提取到 {len(processed)} 个岗位")
-        else:
-            print(f"    ✗ 无搜索证据，跳过")
+            print(f"    ✓ 搜索成功，提取到 {len(processed)} 个岗位")
+        elif result["has_search"]:
+            print(f"    ✓ 搜索成功，未找到{name}郑州实习岗位")
 
     print(f"  轨道B完成，当前共 {len(all_jobs)} 个岗位\n")
 
