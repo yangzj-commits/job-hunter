@@ -1,10 +1,14 @@
 """
-求职雷达 · 双轨搜索引擎 (v3.2 - 加入请求超时)
+求职雷达 · 双轨搜索引擎 (v3.3 - 修复性能问题)
 ============================================================
-v3.2 修复：
-  - 所有 Kimi API 调用加入 timeout=60，防止单次请求卡死
-  - 搜索延迟从3秒降至2秒，整体提速
-  - 其余逻辑与 v3.1 保持一致
+v3.3 修复：
+  1. 搜索循环从 range(5) 改为 range(2)：
+     每次搜索最多3次API调用（1次触发+2次处理），
+     原来最多6次，是运行超时的主要原因
+  2. 公司质量筛选显式禁用 thinking：
+     kimi-k2.5 默认开启 thinking，质量判断是简单事实查询，
+     不需要 thinking，禁用后速度提升明显
+  3. 其余逻辑不变
 """
 
 import os
@@ -33,7 +37,7 @@ def _get_client() -> OpenAI:
         _client = OpenAI(
             api_key=KIMI_API_KEY,
             base_url=BASE_URL,
-            timeout=60,     # 全局超时60秒，防止单次请求卡死
+            timeout=60,
         )
     return _client
 
@@ -148,7 +152,7 @@ SEARCH_TOOLS = [
     }
 ]
 
-# $web_search 必须禁用 thinking 模式
+# $web_search 和质量判断都禁用 thinking（简单任务不需要 thinking）
 THINKING_DISABLED = {"thinking": {"type": "disabled"}}
 
 SYSTEM_PROMPT = """你是专业的招聘信息搜索助手，服务于一名正在找郑州实习工作的2026/2027届应届硕士生。
@@ -182,7 +186,7 @@ def _search_and_extract_jobs(query: str, delay: float = 2.0) -> dict:
     """
     Kimi 一步法：联网搜索 + 直接返回结构化岗位JSON。
     宁缺毋滥：若 Kimi 未触发 $web_search，直接返回空结果。
-    超时：每次请求最多等待60秒（在OpenAI client初始化时设置）。
+    循环上限：2轮（修复：原来5轮导致每次搜索最多6次API调用）
     """
     time.sleep(delay)
     client = _get_client()
@@ -198,7 +202,7 @@ def _search_and_extract_jobs(query: str, delay: float = 2.0) -> dict:
             model=MODEL,
             messages=messages,
             tools=SEARCH_TOOLS,
-            max_tokens=8000,
+            max_tokens=4000,
             extra_body=THINKING_DISABLED,
         )
         choice = response.choices[0]
@@ -223,13 +227,14 @@ def _search_and_extract_jobs(query: str, delay: float = 2.0) -> dict:
                 "content": tc.function.arguments,
             })
 
-        # ── 后续轮次等待 finish_reason=stop ─────────────────
-        for turn in range(5):
+        # ── 后续轮次等待 finish_reason=stop（最多2轮）────────
+        # 修复：原来 range(5) 最多5轮额外请求，是超时的主要原因
+        for turn in range(2):
             response2 = client.chat.completions.create(
                 model=MODEL,
                 messages=messages,
                 tools=SEARCH_TOOLS,
-                max_tokens=8000,
+                max_tokens=4000,
                 extra_body=THINKING_DISABLED,
             )
             choice2 = response2.choices[0]
@@ -322,47 +327,34 @@ def _job_hash(job: dict) -> str:
 
 
 # ============================================================
-# 公司质量筛选（四方案并行，普通调用）
+# 公司质量筛选（四方案并行，禁用thinking加速）
 # ============================================================
 
 def _is_quality_company_batch(company_names: list) -> dict:
     """
     四方案并行白名单筛选：B 或 C 或 D 或 E 任一满足即合格。
-    普通调用，不使用 $web_search，无需禁用 thinking。
+    禁用 thinking：质量判断是简单事实查询，不需要推理，禁用后速度更快。
     """
     if not company_names:
         return {}
 
     names_text = "\n".join(f"- {n}" for n in company_names)
 
-    prompt = f"""你是企业信息核查助手。请判断以下每家公司是否符合至少一个条件：
+    prompt = f"""判断以下每家公司是否符合至少一个条件（符合任意一条即为"合格"）：
+B. 上市公司：在A股、港股、美股等任一正规交易所上市
+C. 外资或合资：外商独资或中外合资企业
+D. 500强：世界500强或中国500强
+E. 行业前5：国内主营业务市场份额前5名
 
-【判断条件】（符合任意一条即为"合格"）
-B. 上市公司：在A股、港股、美股、纽交所、纳斯达克等任一正规交易所上市
-C. 外资或合资：外商独资企业，或中外合资企业（外方持股比例显著）
-D. 500强成员：世界500强 或 中国500强（福布斯/财富榜单）
-E. 行业前5：在其主营业务所在行业，国内市场份额/品牌影响力位列前5名
-
-【待判断公司列表】
+公司列表：
 {names_text}
 
-【重要原则】
-- 必须基于你掌握的确定事实作判断，不得猜测或推断
-- 对不熟悉、无法确认的公司，一律判为不合格（qualified: false）
-- 宁缺毋滥：郑州本地中小企业如无法确认，一律判为不合格
+原则：不确定的一律判为不合格，宁缺毋滥。
 
-【返回格式】纯JSON对象，不要任何其他文字：
+返回纯JSON对象：
 {{
-  "公司名": {{
-    "qualified": true,
-    "matched_criteria": "B",
-    "reason": "在A股上海证券交易所上市"
-  }},
-  "公司名2": {{
-    "qualified": false,
-    "matched_criteria": "",
-    "reason": "郑州本地中小企业，无法确认符合任何条件"
-  }}
+  "公司名": {{"qualified": true, "matched_criteria": "B", "reason": "A股上市"}},
+  "公司名2": {{"qualified": false, "matched_criteria": "", "reason": "无法确认"}}
 }}"""
 
     try:
@@ -370,10 +362,11 @@ E. 行业前5：在其主营业务所在行业，国内市场份额/品牌影响
         response = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": "你是企业信息核查助手，只返回JSON，不要任何其他文字。"},
+                {"role": "system", "content": "只返回JSON，不要其他文字。"},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=4000,
+            max_tokens=2000,
+            extra_body=THINKING_DISABLED,  # 修复：质量判断禁用thinking，加快速度
         )
 
         raw = (response.choices[0].message.content or "{}").strip()
