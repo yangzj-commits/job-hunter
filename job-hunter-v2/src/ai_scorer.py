@@ -1,10 +1,14 @@
 """
-求职雷达 · AI评分模块 (v3.2 - 修复性能问题)
-修复：
-  1. client 加入 timeout=60，防止评分请求无限挂起
-  2. budget_tokens 从 2000 降至 500，减少thinking耗时
-  3. max_tokens 从 6000 降至 3000
-  4. batch_size 从 20 降至 10，每批响应更快
+求职雷达 · AI评分模块 (v3.4 - 扩充过滤 + 规则兜底)
+============================================================
+v3.4 改动：
+  1. EXCLUDE_KEYWORDS 扩充至 50+ 关键词，覆盖安检/维修/直播/
+     开发/设计/人资/财务/游戏测试/行政等不相关方向
+  2. 新增垃圾数据过滤：公司名含"某"/"未明确"/空 直接丢弃
+  3. 新增规则引擎兜底评分：当AI评分不可用（429等）时，
+     用岗位方向关键词匹配 + 白名单加分给出粗略分数，
+     避免所有岗位都是统一的50/60分
+  4. 推荐门槛调整说明：配合 email_sender 使用
 """
 
 import os
@@ -18,7 +22,7 @@ KIMI_API_KEY = os.environ.get("KIMI_API_KEY", "")
 MODEL = "kimi-k2.5"
 BASE_URL = "https://api.moonshot.cn/v1"
 
-# thinking 模式：评分场景开启，但控制 budget 避免过度消耗
+# thinking 模式：评分场景开启，控制 budget 避免过度消耗
 THINKING_ENABLED = {"thinking": {"type": "enabled", "budget_tokens": 500}}
 
 # ---------- 白名单公司（定向加分）----------
@@ -32,15 +36,66 @@ PRIORITY_COMPANIES = [
     "海尔", "联想", "用友", "金蝶", "华润", "中粮", "牧原", "宇通客车",
 ]
 
-# ---------- 直接排除的岗位关键词 ----------
+# ---------- 直接排除的岗位关键词（v3.4 大幅扩充）----------
 EXCLUDE_KEYWORDS = [
+    # ── 体力劳动 / 工厂 ──
     "工厂实习", "生产实习", "设备巡检", "车间", "流水线", "装配", "生产工人",
+    "品控员", "生产支持",
+
+    # ── 安保 / 安检 ──
+    "安检", "安检员", "地铁安检", "保安", "巡检员", "安保",
+
+    # ── 维修 / 保养 ──
+    "汽车维修", "汽车保养", "维修保养",
+
+    # ── 中介 / 招聘 ──
     "猎头", "HR外包", "招聘实习", "灵活用工",
-    "地推", "BD实习", "业务拓展实习", "扫楼", "陌生拜访",
-    "出纳实习", "会计助理", "记账实习", "做账",
+
+    # ── 销售地推 ──
+    "地推", "BD实习", "业务拓展实习", "扫楼", "陌生拜访", "商务BD",
+
+    # ── 财务记账 ──
+    "出纳实习", "出纳", "会计助理", "记账实习", "做账", "财务实习",
+
+    # ── 法务 ──
     "法务助理", "法律助理实习",
-    "平面设计", "UI设计实习", "视觉设计实习", "美工实习",
-    "司机", "保安", "厨师", "保洁",
+
+    # ── 设计 ──
+    "平面设计", "UI设计", "视觉设计", "美工", "UE设计",
+
+    # ── 基础服务 ──
+    "司机", "厨师", "保洁",
+
+    # ── 直播 / 短视频 / 内容创作 ──
+    "主播", "直播运营", "直播", "短视频", "剪辑", "拍摄", "拍剪",
+    "视频编导", "编导", "短视频后期", "短视频运营", "短视频剪辑",
+
+    # ── 软件开发 / 编程（非目标方向）──
+    "Java开发", "C++", "C/C++", "前端开发", "Web前端", "后端开发",
+    "算法开发", "AI开发", "人工智能开发", "数据库开发",
+
+    # ── 测试 ──
+    "游戏测试", "测试实习",
+
+    # ── 行政 / 党务 ──
+    "党工团", "行政后勤", "行政安保", "行政实习",
+
+    # ── 人力资源（纯HR岗）──
+    "人资实习", "人力资源实习", "HR实习", "招聘信息发布",
+
+    # ── 教育/招生 ──
+    "招生", "培训顾问", "客户服务顾问",
+
+    # ── 工程 / 建筑（非目标方向）──
+    "工程造价", "机械工程",
+
+    # ── 电商 ──
+    "电商运营",
+]
+
+# ---------- 垃圾公司名关键词 ----------
+GARBAGE_COMPANY_PATTERNS = [
+    "某", "信息未明确", "未知", "匿名", "信息未",
 ]
 
 # ---------- 车企关键词 ----------
@@ -48,6 +103,32 @@ CAR_COMPANY_KEYWORDS = [
     "汽车", "车", "宇通", "比亚迪", "上汽", "一汽", "吉利", "长安",
     "奔驰", "宝马", "奥迪", "丰田", "本田", "大众", "福特", "沃尔沃",
 ]
+
+# ---------- 规则引擎评分：方向关键词及对应加分 ----------
+DIRECTION_SCORE_MAP = {
+    "数据分析": 30,
+    "商业分析": 30,
+    "BI": 25,
+    "信息管理": 25,
+    "信息化": 20,
+    "ERP": 25,
+    "实施顾问": 20,
+    "管理咨询": 25,
+    "风险咨询": 25,
+    "咨询": 20,
+    "审计": 20,
+    "产品运营": 20,
+    "供应链运营": 20,
+    "供应链": 15,
+    "运营": 10,
+    "产品经理": 20,
+    "项目管理": 20,
+    "项目助理": 15,
+    "数字化": 20,
+    "IT支持": 15,
+    "系统支持": 15,
+    "软件交付": 15,
+}
 
 _client = None
 
@@ -58,7 +139,7 @@ def _get_client() -> OpenAI:
         _client = OpenAI(
             api_key=KIMI_API_KEY,
             base_url=BASE_URL,
-            timeout=60,     # 修复：加入超时，防止评分请求无限挂起
+            timeout=60,
         )
     return _client
 
@@ -79,14 +160,31 @@ def _is_car_company(company: str) -> bool:
 
 
 def _pre_filter(jobs: list) -> list:
+    """预过滤：排除关键词命中 + 垃圾公司名"""
     result = []
     for job in jobs:
         title = job.get("title", "")
-        company = job.get("company", "")
-        combined = title + company
-        if any(kw in combined for kw in EXCLUDE_KEYWORDS):
-            print(f"  [过滤] 排除: {title} @ {company}")
+        company = job.get("company", "").strip()
+
+        # 垃圾公司名过滤
+        if not company or len(company) < 2:
+            print(f"  [过滤] 垃圾数据（公司名无效）: {title} @ {company or '(空)'}")
             continue
+        if any(p in company for p in GARBAGE_COMPANY_PATTERNS):
+            print(f"  [过滤] 垃圾数据（公司名模糊）: {title} @ {company}")
+            continue
+
+        # 关键词排除
+        combined = title + company
+        excluded = False
+        for kw in EXCLUDE_KEYWORDS:
+            if kw in combined:
+                print(f"  [过滤] 排除({kw}): {title} @ {company}")
+                excluded = True
+                break
+        if excluded:
+            continue
+
         result.append(job)
     return result
 
@@ -113,6 +211,49 @@ def _pre_score_adjust(job: dict, base_score: int) -> tuple:
         note = "小型会计事务所审计，含金量相对较低"
 
     return base_score, note
+
+
+def _rule_based_score(job: dict) -> tuple:
+    """
+    规则引擎兜底评分：当AI评分不可用时使用。
+    基于岗位标题中的方向关键词匹配 + 白名单公司加分，
+    给出 0-100 的粗略分数，保留基本区分能力。
+    """
+    title = job.get("title", "")
+    company = job.get("company", "")
+    score = 35  # 基础分
+
+    # 方向关键词加分（只取最高匹配的一个）
+    best_direction_bonus = 0
+    matched_direction = ""
+    for kw, bonus in DIRECTION_SCORE_MAP.items():
+        if kw in title and bonus > best_direction_bonus:
+            best_direction_bonus = bonus
+            matched_direction = kw
+    score += best_direction_bonus
+
+    # 白名单公司加分
+    if _is_priority_company(company):
+        score += 10
+
+    # 全职压分
+    if job.get("apply_type") == "fulltime":
+        score = min(score, 18)
+
+    # 非车企销售降分
+    if "销售" in title and not _is_car_company(company):
+        score = max(0, score - 20)
+
+    score = min(100, max(0, score))
+
+    reason_parts = []
+    if matched_direction:
+        reason_parts.append(f"方向匹配:{matched_direction}")
+    if _is_priority_company(company):
+        reason_parts.append("重点目标公司")
+    reason_parts.append("规则引擎评分(AI不可用)")
+
+    return score, " | ".join(reason_parts)
 
 
 def _build_scoring_prompt(jobs: list) -> str:
@@ -145,21 +286,22 @@ def _build_scoring_prompt(jobs: list) -> str:
 
 
 def score_jobs_with_gemini(jobs: list) -> list:
-    """函数名保持不变，内部已切换为 Kimi + thinking 模式。"""
+    """函数名保持不变（被main.py调用），内部已切换为 Kimi + thinking 模式。"""
     if not jobs:
         return []
 
     if not KIMI_API_KEY:
-        print("[AI评分] 未配置 KIMI_API_KEY，所有岗位默认50分")
+        print("[AI评分] 未配置 KIMI_API_KEY，使用规则引擎评分")
         for job in jobs:
-            job["score"] = 50
-            job["score_reason"] = "未配置AI评分"
+            score, reason = _rule_based_score(job)
+            job["score"] = score
+            job["score_reason"] = reason
         return jobs
 
     jobs = _pre_filter(jobs)
     print(f"[AI评分] 预过滤后剩余 {len(jobs)} 个岗位")
 
-    batch_size = 10   # 修复：从20降至10，配合thinking模式响应更快
+    batch_size = 10
     all_scored = []
 
     for batch_start in range(0, len(jobs), batch_size):
@@ -178,7 +320,7 @@ def score_jobs_with_gemini(jobs: list) -> list:
                     {"role": "system", "content": "职业规划顾问，只返回JSON。"},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=3000,            # 修复：从6000降至3000
+                max_tokens=3000,
                 extra_body=THINKING_ENABLED,
             )
 
@@ -216,12 +358,22 @@ def score_jobs_with_gemini(jobs: list) -> list:
                 all_scored.append(job)
 
         except Exception as e:
-            print(f"[AI评分] 评分失败: {e}")
+            err_str = str(e)
+            is_429 = "429" in err_str
+            if is_429:
+                print(f"[AI评分] 批次{batch_num} 限流(429)，使用规则引擎兜底")
+            else:
+                print(f"[AI评分] 评分失败: {err_str[:100]}，使用规则引擎兜底")
+
+            # v3.4：改用规则引擎兜底，不再统一给50/60分
             for job in batch:
-                bonus = 10 if _is_priority_company(job.get("company", "")) else 0
-                adjusted, rule_note = _pre_score_adjust(job, 50)
-                job["score"] = min(100, adjusted + bonus)
-                job["score_reason"] = f"评分出错: {str(e)[:60]}"
+                score, reason = _rule_based_score(job)
+                # 规则引擎的结果也走 _pre_score_adjust
+                adjusted, rule_note = _pre_score_adjust(job, score)
+                if rule_note:
+                    reason = f"{reason} | [{rule_note}]"
+                job["score"] = adjusted
+                job["score_reason"] = reason
                 all_scored.append(job)
 
         if batch_start + batch_size < len(jobs):
