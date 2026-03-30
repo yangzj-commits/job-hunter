@@ -1,33 +1,102 @@
 [
   {
-    "name": "金蝶软件(中国)有限公司郑州分公司",
-    "careers_url": "https://campus.51job.com/kingdee/",
-    "auto_added": true
-  },
-  {
-    "name": "郑州太古可口可乐饮料有限公司",
-    "careers_url": "",
-    "auto_added": true,
-    "source": "公司发现引擎"
-  },
-  {
-    "name": "亚信科技",
-    "careers_url": "https://campus.asiainfo.com/",
-    "auto_added": true
-  },
-  {
-    "name": "北森云计算有限公司",
-    "careers_url": "https://www.beisen.com/aboutus/join.html",
-    "auto_added": true
+    "name": "KPMG 毕马威",
+    "careers_url": "https://home.kpmg/cn/zh/home/careers.html",
+    "note": "四大会计师事务所，外资，审计/咨询实习"
   },
   {
     "name": "蜜雪冰城股份有限公司",
     "careers_url": "https://careers.mixueglobal.com/",
-    "auto_added": true
+    "note": "港股上市，总部郑州，快消龙头，数据分析岗"
+  },
+  {
+    "name": "宇通客车股份有限公司",
+    "careers_url": "https://zhaopin.yutong.com/",
+    "note": "A股上市，郑州本地龙头，客车制造"
+  },
+  {
+    "name": "牧原食品股份有限公司",
+    "careers_url": "https://campus.muyuanfoods.com/",
+    "note": "A股上市，郑州本地龙头，农业"
   },
   {
     "name": "中国银行股份有限公司",
     "careers_url": "https://campus.boc.cn/",
-    "auto_added": true
+    "note": "A股/港股，四大行，郑州分行"
+  },
+  {
+    "name": "超聚变数字技术有限公司",
+    "careers_url": "https://www.xfusion.com/cn/about/join-us/",
+    "note": "华为系IT，郑州总部"
+  },
+  {
+    "name": "金蝶软件（中国）有限公司",
+    "careers_url": "https://campus.51job.com/kingdee/",
+    "note": "港股上市，ERP/企业软件"
+  },
+  {
+    "name": "北森云计算有限公司",
+    "careers_url": "https://www.beisen.com/aboutus/join.html",
+    "note": "港股上市，HR SaaS"
+  },
+  {
+    "name": "亚信科技",
+    "careers_url": "https://campus.asiainfo.com/",
+    "note": "港股上市，IT服务"
+  },
+  {
+    "name": "中国平安",
+    "careers_url": "https://campus.pingan.com/",
+    "note": "A股/港股，保险金融"
+  },
+  {
+    "name": "美团",
+    "careers_url": "https://zhaopin.meituan.com/",
+    "note": "港股上市，互联网"
+  },
+  {
+    "name": "字节跳动",
+    "careers_url": "https://jobs.bytedance.com/campus",
+    "note": "互联网大厂，数据/运营"
+  },
+  {
+    "name": "腾讯",
+    "careers_url": "https://join.qq.com/",
+    "note": "港股上市，互联网大厂"
+  },
+  {
+    "name": "许继电气股份有限公司",
+    "careers_url": "https://www.xj.com.cn/xj/recruitment/",
+    "note": "A股上市，郑州本地，电气设备"
+  },
+  {
+    "name": "中国移动通信有限公司在线营销服务中心",
+    "careers_url": "https://zxyx2026.zhaopin.com/cl/index.html",
+    "note": "中国移动子公司，郑州运营中心"
+  },
+  {
+    "name": "郑州太古可口可乐饮料有限公司",
+    "careers_url": "https://www.swirecocacola.com/sc/careers/",
+    "note": "外资合资，快消行业"
+  },
+  {
+    "name": "德邦快递",
+    "careers_url": "https://campus.deppon.com/",
+    "note": "A股上市，物流"
+  },
+  {
+    "name": "华为",
+    "careers_url": "https://career.huawei.com/reccampportal/portal5/index.html",
+    "note": "ICT龙头，郑州有研究所"
+  },
+  {
+    "name": "用友网络科技股份有限公司",
+    "careers_url": "https://career.yonyou.com/",
+    "note": "A股上市，ERP/企业软件龙头"
+  },
+  {
+    "name": "中原银行",
+    "careers_url": "https://www.zynbank.com/zhaopin/index.html",
+    "note": "港股上市，郑州本地银行"
   }
 ]
