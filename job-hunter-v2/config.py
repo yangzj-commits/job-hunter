@@ -1,5 +1,5 @@
 # ============================================================
-# 求职雷达 · 配置文件 (v3.4 - 精简关键词 + token优化)
+# 求职雷达 · 配置文件 (v3.5 - 新增公司发现引擎)
 # ============================================================
 
 # ---------- 模型（Kimi）----------
@@ -26,7 +26,7 @@ SEARCH_KEYWORDS = [
     "审计实习生 郑州 四大",
 ]
 
-# ---------- 招聘平台搜索域名限定（Kimi境内搜索已放宽，此项保留备用）----------
+# ---------- 招聘平台搜索域名限定（保留备用）----------
 SEARCH_SITE_FILTER = (
     "site:liepin.com OR site:zhipin.com OR site:maimai.cn "
     "OR site:51job.com OR site:zhaopin.com OR site:lagou.com"
@@ -38,9 +38,12 @@ MIN_SCORE_HIGHLIGHT = 60    # 高亮推荐分数线
 
 # ---------- 自动学习：白名单更新 ----------
 AUTO_UPDATE_WHITELIST = True   # 发现符合质量标准的新公司自动加入白名单
-WHITELIST_MAX_SIZE = 30        # 白名单最大公司数，控制轨道B搜索次数
+WHITELIST_MAX_SIZE = 30        # 白名单最大公司数
 AUTO_LEARN_MAX_CANDIDATES = 10 # 每次运行最多送10家新公司去做AI质量判断
 
+# ---------- 公司发现引擎（轨道C）----------
+DISCOVERY_ENABLED = True       # 是否启用公司发现引擎
+DISCOVERY_MAX_ADD = 10         # 单次发现最多加入白名单的公司数（白名单满则不再发现）
+
 # ---------- GitHub Actions 运行时间 ----------
-# UTC 01:00 = 北京 09:00，周二、三、四运行
 CRON_SCHEDULE = "0 1 * * 2,3,4"
